@@ -204,8 +204,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 👤 Author
 
 **Bilal Choudhary**
-- GitHub: [@YOUR_GITHUB_USERNAME](https://github.com/YOUR_GITHUB_USERNAME)
-- LinkedIn: [Your LinkedIn](https://linkedin.com/in/your-profile)
+- GitHub: [@Bilal-03](https://github.com/Bilal-03)
+- LinkedIn: [bilal2012](https://linkedin.com/in/bilal2012)
 
 ## 🙏 Acknowledgments
 
@@ -215,7 +215,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Contact
 
-For questions or feedback, please reach out via [your-email@example.com](mailto:your-email@example.com)
+For questions or feedback, please reach out via [bilal3512@gmail.com](mailto:bilal3512@gmail.com)
 
 ---
 
