@@ -63,16 +63,16 @@ Use `backend/.env` for optional authentication or external-VLM settings. Never c
 
 ## Deploy to Render and Vercel
 
-The repository includes a production Docker configuration for the FastAPI API on
-Render and a Vercel configuration for the Next.js dashboard.
-
-1. In Render, create a Blueprint from this repository. It uses `render.yaml` to
-   create the API service and a persistent disk for SQLite data and uploaded
-   invoices. Once the service is live, copy its URL (for example,
+1. In Render, create a **Web Service** from this repository. Set the root
+   directory to `backend` and select **Docker**. Add a persistent disk mounted
+   at `/var/data`.
+2. Set `DATABASE_URL` to `sqlite+aiosqlite:////var/data/invoices.db`,
+   `UPLOAD_DIR` to `/var/data/uploads`, and `ENVIRONMENT` to `production`.
+   Once the service is live, copy its URL (for example,
    `https://invoice-extraction-api.onrender.com`).
-2. In Vercel, import the same repository and set **Root Directory** to
+3. In Vercel, import the same repository and set **Root Directory** to
    `frontend`. Add `NEXT_PUBLIC_API_URL` with the Render API URL, then deploy.
-3. Back in Render, set `CORS_ORIGINS` to a JSON list containing the Vercel URL,
+4. Back in Render, set `CORS_ORIGINS` to a JSON list containing the Vercel URL,
    for example `[“https://your-app.vercel.app”]`, and redeploy the API.
 
 For a protected API, also set `API_KEY`, or set `AUTH_USERNAME`,
