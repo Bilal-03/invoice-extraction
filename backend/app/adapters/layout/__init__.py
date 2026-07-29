@@ -1,0 +1,1 @@
+"""Layout-aware extraction adapters."""

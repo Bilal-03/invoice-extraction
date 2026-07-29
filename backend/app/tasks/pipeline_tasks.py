@@ -1,0 +1,171 @@
+"""
+Background task for the document extraction pipeline.
+
+Runs in FastAPI's built-in background task system so the application needs no
+queue server or worker process.
+"""
+
+from sqlalchemy import select
+
+from app.adapters.ocr.base import OCREngine
+from app.adapters.storage.base import ObjectStorage
+from app.adapters.vlm.base import VLMClient
+from app.core.database import async_session_factory
+from app.core.logging import get_logger
+from app.core.metrics import record_document
+from app.domain.entities import Document
+from app.domain.schemas import DocumentStatus, ValidationFlag, ValidationSeverity
+from app.services.extraction_service import ExtractionService
+
+logger = get_logger(__name__)
+
+
+async def dispatch_extraction_pipeline(
+    background_tasks,
+    document_id: str,
+    storage: ObjectStorage,
+    ocr_engine: OCREngine,
+    vlm_client: VLMClient | None,
+) -> None:
+    """Schedule extraction in the API process after the upload response is sent."""
+    background_tasks.add_task(
+        run_extraction_pipeline,
+        document_id=document_id,
+        storage=storage,
+        ocr_engine=ocr_engine,
+        vlm_client=vlm_client,
+    )
+
+
+async def run_extraction_pipeline(
+    document_id: str,
+    storage: ObjectStorage,
+    ocr_engine: OCREngine,
+    vlm_client: VLMClient | None = None,
+) -> None:
+    """
+    Run the full extraction pipeline as a background task.
+
+    1. Fetch document from DB
+    2. Download image bytes from storage
+    3. Run ExtractionService
+    4. Save results back to DB
+    """
+    logger.info("pipeline_started", document_id=document_id)
+
+    async with async_session_factory() as session:
+        # Fetch document
+        stmt = select(Document).where(Document.id == document_id)
+        result = await session.execute(stmt)
+        document = result.scalar_one_or_none()
+
+        if not document:
+            logger.error("pipeline_aborted_doc_not_found", document_id=document_id)
+            return
+
+        try:
+            # Update status
+            document.status = DocumentStatus.PREPROCESSING.value
+            await session.commit()
+
+            # Fetch image bytes
+            file_bytes = await storage.download(document.file_path)
+
+            # Decode every page so multi-page invoices remain one logical document.
+            from app.adapters.preprocessing.pipeline import (
+                extract_pdf_text,
+                load_image_from_bytes,
+                load_pdf_pages,
+            )
+
+            # Detect PDF by magic bytes (%PDF) or file extension
+            is_pdf = file_bytes[:4] == b"%PDF" or document.file_path.lower().endswith(".pdf")
+
+            if is_pdf:
+                images = load_pdf_pages(file_bytes)
+                text_hint = extract_pdf_text(file_bytes)
+                if not images:
+                    raise ValueError("PDF has no pages")
+            else:
+                images = [load_image_from_bytes(file_bytes)]
+                text_hint = None
+
+            document.page_count = len(images)
+
+            # Run extraction
+            document.status = DocumentStatus.EXTRACTING.value
+            await session.commit()
+
+            service = ExtractionService(ocr_engine=ocr_engine, vlm_client=vlm_client)
+
+            async def update_status(pipeline_status: DocumentStatus) -> None:
+                document.status = pipeline_status.value
+                await session.commit()
+
+            extraction_result = await service.extract_from_images(
+                images, update_status, text_hint=text_hint
+            )
+
+            # Business-key duplicate detection catches re-scans whose bytes differ.
+            vendor_name = extraction_result.vendor.name.value
+            invoice_number = extraction_result.invoice_number.value
+            if vendor_name and invoice_number:
+                candidates = await session.scalars(
+                    select(Document).where(
+                        Document.id != document_id,
+                        Document.vendor_name == vendor_name,
+                        Document.status == DocumentStatus.COMPLETED.value,
+                    )
+                )
+                for candidate in candidates:
+                    previous = candidate.extraction_result or {}
+                    previous_number = (previous.get("invoice_number") or {}).get("value")
+                    if previous_number and previous_number.casefold() == invoice_number.casefold():
+                        extraction_result.validation_flags.append(
+                            ValidationFlag(
+                                rule="duplicate_invoice",
+                                passed=False,
+                                message=f"Possible duplicate of document {candidate.id}",
+                                severity=ValidationSeverity.ERROR,
+                            )
+                        )
+                        break
+
+            # Save results
+            document.extraction_result = extraction_result.model_dump(mode="json")
+            document.overall_confidence = extraction_result.overall_confidence
+            document.processing_time_ms = extraction_result.processing_time_ms
+            document.extraction_source = extraction_result.extraction_source.value
+
+            # Denormalise key fields for dashboard filtering/analytics
+            if extraction_result.vendor.name.value:
+                document.vendor_name = extraction_result.vendor.name.value
+
+            if extraction_result.grand_total is not None:
+                document.grand_total = float(extraction_result.grand_total)
+
+            document.currency = extraction_result.currency
+            document.status = DocumentStatus.COMPLETED.value
+
+            await session.commit()
+            record_document(
+                "completed",
+                extraction_result.extraction_source.value,
+                extraction_result.processing_time_ms / 1000,
+            )
+            logger.info("pipeline_completed_successfully", document_id=document_id)
+
+        except Exception as e:
+            # Handle failure
+            logger.exception("pipeline_failed", document_id=document_id, error=str(e))
+
+            # Use a fresh session for the error update in case the previous one is broken
+            async with async_session_factory() as error_session:
+                stmt = select(Document).where(Document.id == document_id)
+                res = await error_session.execute(stmt)
+                doc = res.scalar_one_or_none()
+                if doc:
+                    doc.status = DocumentStatus.FAILED.value
+                    doc.error_message = str(e)
+                    await error_session.commit()
+            record_document("failed")
