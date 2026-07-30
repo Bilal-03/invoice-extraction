@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.domain.schemas import (
     BuyerDetails,
+    BoundingBox,
     ExtractionSource,
     FieldValue,
     InvoiceExtraction,
@@ -89,17 +90,23 @@ Return ONLY valid JSON with this exact structure:
   "tax_total": number or null,
   "shipping_amount": number or null,
   "grand_total": number or null,
-  "currency": "INR|USD|EUR|GBP"
-}"""
+  "currency": "INR|USD|EUR|GBP",
+  "field_locations": {
+    "invoice_number": {"x0": 0.0, "y0": 0.0, "x1": 0.0, "y1": 0.0, "page": 0}
+  }
+}
+For every non-null scalar field, include an approximate normalized bounding box
+in field_locations when you can locate it. Coordinates are fractions of the
+page from top-left; use page 0 for the first page. Never invent a box for a
+field that is not present."""
 
 
 class GeminiVLMClient(VLMClient):
     """
     Google Gemini Vision Language Model client.
 
-    Uses structured prompting to extract invoice fields directly
-    into the Pydantic schema. Cost-efficient because it's only
-    triggered as a fallback when OCR/regex confidence is low.
+    Uses structured prompting to independently verify invoice fields while
+    OCR/layout extraction runs in parallel.
     """
 
     def __init__(self, api_key: str | None = None, model: str | None = None):
@@ -148,20 +155,13 @@ class GeminiVLMClient(VLMClient):
                     ]
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 2048,
-                "response_mime_type": "application/json",
-            },
+            "generationConfig": {"maxOutputTokens": 2048, "response_mime_type": "application/json"},
         }
 
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent?key={self.api_key}"
-        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, json=payload, headers={"x-goog-api-key": self.api_key})
             response.raise_for_status()
 
         result = response.json()
@@ -212,11 +212,24 @@ class GeminiVLMClient(VLMClient):
         """Map Gemini's raw JSON response to our InvoiceExtraction schema."""
         source = ExtractionSource.VLM_FALLBACK
 
-        def _field(value) -> FieldValue:
+        locations = data.get("field_locations") or {}
+
+        def _location(name: str) -> BoundingBox | None:
+            raw = locations.get(name)
+            if not raw:
+                return None
+            try:
+                return BoundingBox.model_validate(raw)
+            except Exception:
+                logger.warning("gemini_invalid_field_location", field=name)
+                return None
+
+        def _field(value, name: str) -> FieldValue:
             return FieldValue(
                 value=str(value) if value is not None else None,
                 confidence=0.85 if value is not None else 0.0,
                 source=source,
+                bounding_box=_location(name),
             )
 
         # Parse line items
@@ -252,20 +265,20 @@ class GeminiVLMClient(VLMClient):
             )
 
         return InvoiceExtraction(
-            invoice_number=_field(data.get("invoice_number")),
+            invoice_number=_field(data.get("invoice_number"), "invoice_number"),
             invoice_date=data.get("invoice_date"),
             due_date=data.get("due_date"),
-            po_reference=_field(data.get("po_reference")),
+            po_reference=_field(data.get("po_reference"), "po_reference"),
             payment_terms=data.get("payment_terms"),
             vendor=VendorDetails(
-                name=_field(data.get("vendor_name")),
-                address=_field(data.get("vendor_address")),
-                gstin=_field(data.get("vendor_gstin")),
+                name=_field(data.get("vendor_name"), "vendor_name"),
+                address=_field(data.get("vendor_address"), "vendor_address"),
+                gstin=_field(data.get("vendor_gstin"), "vendor_gstin"),
             ),
             buyer=BuyerDetails(
-                name=_field(data.get("buyer_name")),
-                billing_address=_field(data.get("buyer_billing_address")),
-                shipping_address=_field(data.get("buyer_shipping_address")),
+                name=_field(data.get("buyer_name"), "buyer_name"),
+                billing_address=_field(data.get("buyer_billing_address"), "buyer_billing_address"),
+                shipping_address=_field(data.get("buyer_shipping_address"), "buyer_shipping_address"),
             )
             if any(
                 data.get(key)
@@ -286,6 +299,14 @@ class GeminiVLMClient(VLMClient):
             currency=data.get("currency", "INR"),
             overall_confidence=0.85,
             extraction_source=source,
+            field_locations={
+                key: location
+                for key in (
+                    "invoice_date", "due_date", "payment_terms", "subtotal",
+                    "tax_total", "grand_total", "currency",
+                )
+                if (location := _location(key)) is not None
+            },
         )
 
     async def health_check(self) -> bool:
@@ -293,12 +314,9 @@ class GeminiVLMClient(VLMClient):
         try:
             import httpx
 
-            url = (
-                f"https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{self.model}?key={self.api_key}"
-            )
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}"
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(url)
+                response = await client.get(url, headers={"x-goog-api-key": self.api_key})
                 return response.status_code == 200
         except Exception as e:
             logger.error("gemini_health_fail", error=str(e))

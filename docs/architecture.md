@@ -1,18 +1,20 @@
 # Architecture
 
-The API accepts validated PDF/image uploads, stores the raw file locally, persists a pending document record in SQLite, and dispatches an in-process extraction job through FastAPI background tasks.
+The API accepts validated PDF/image uploads, persists a pending durable job in Postgres, and lets a separate worker process perform extraction. Local SQLite and filesystem storage remain available only for laptop development.
 
 ```mermaid
 flowchart LR
   UI[Next.js review dashboard] --> API[FastAPI v1 API]
-  API --> DB[(SQLite)]
-  API --> Store[Local uploads]
-  API --> Job[FastAPI background task]
-  Job --> Pre[OpenCV preprocessing]
+  API --> DB[(Postgres)]
+  API --> Store[Private object storage]
+  API --> Job[Durable document job]
+  Job --> Worker[Dedicated worker]
+  Worker --> Pre[OpenCV preprocessing]
   Pre --> OCR[PaddleOCR / Tesseract fallback]
   OCR --> Layout[Spatial layout extractor]
   Layout --> Validate[Domain validation]
-  Validate -->|low confidence| VLM[Gemini fallback]
+  Pre --> VLM[Gemini verification]
+  VLM --> Validate
   Validate --> DB
   VLM --> DB
 ```

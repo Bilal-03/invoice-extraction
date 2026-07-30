@@ -2,8 +2,8 @@
 
 A full-stack intelligent document processing system for invoice ingestion, layout-aware OCR, structured extraction, validation, human review, audit, and analytics.
 
-The application runs entirely on a laptop: FastAPI + SQLite + local file storage +
-in-process background tasks + Tesseract. It needs no Docker or external services.
+For laptop development the application uses FastAPI + SQLite + local file storage +
+Tesseract. Shared environments use Postgres, Supabase Storage, and a separate durable worker.
 
 No cloud key is required for the deterministic pipeline.
 
@@ -14,21 +14,22 @@ No cloud key is required for the deterministic pipeline.
 - OpenCV grayscale, quality-aware denoising, adaptive thresholding, and deskew preprocessing.
 - Embedded-text-first extraction for digital PDFs, with word-level Tesseract/PaddleOCR coordinates and spatial column reconstruction for scanned documents.
 - A pluggable spatial layout extractor covering invoice number/dates, PO/order reference, terms, vendor/GSTIN/address, buyer billing/shipping details, taxes, currency, full totals, and multi-line table items.
-- Confidence-gated Gemini structured-output fallback when explicitly enabled.
+- Parallel Gemini structured-output verification when a server-side key is configured.
 - Arithmetic, date, GSTIN, required-field, and duplicate validation flags.
-- SQLite persistence, local file storage, progressive job states, audit history, and human corrections.
+- Durable job states, audit history, and human corrections; SQLite/local storage only for laptop development.
 - API-key or HS256 bearer authentication, CORS, rate limiting, readiness/liveness probes, structured logs, and Prometheus metrics.
+- OpenTelemetry tracing for API, database, queue, worker, and extraction stages with optional OTLP/HTTP export.
 - Next.js dashboard with batch upload, live status polling, filters, authenticated image/PDF preview, confidence boxes, editable fields, validation flags, audit timeline, vendor spend, and processing trends.
 - Evaluation CLI producing JSON and Markdown metrics and CI gates.
 
 ## Architecture
 
 ```text
-Next.js → FastAPI → SQLite metadata DB + local uploads
+Next.js → FastAPI → Postgres metadata DB + object storage
                     ↓
-       in-process background extraction
+           durable document-job queue
                     ↓
- preprocess → OCR fallback chain → spatial extraction → validate → optional VLM → persist
+ preprocess → OCR fallback chain → spatial extraction → Gemini verification → validate → persist
 ```
 
 See [docs/architecture.md](docs/architecture.md) for the adapter boundaries and security model.
@@ -46,7 +47,15 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
-In a second shell:
+In a second shell, start the durable worker:
+
+```bash
+cd backend
+source .venv/bin/activate
+python -m app.worker
+```
+
+Then start the frontend:
 
 ```bash
 cd frontend
@@ -76,11 +85,6 @@ after adding the server-only key from the Supabase dashboard. Never add that key
 frontend environment file. Jobs remain queued safely in Postgres whenever the worker is
 not running. See `docs/production-readiness.md` for operations and retention guidance.
 
-For a single free Render web service, set `EMBEDDED_WORKER_ENABLED=true` in Render.
-The web service then consumes queued OCR jobs itself after an upload wakes it; no laptop
-terminal is needed. Render can still spin down after inactivity, so queued jobs resume on
-the next request rather than being processed continuously.
-
 The SQLite database and local upload directory are created automatically at startup.
 Data is stored in `backend/data/invoices.db` and `backend/data/uploads`.
 
@@ -88,13 +92,17 @@ Use `backend/.env` for optional authentication or external-VLM settings. Never c
 
 ## Deploy to Render and Vercel
 
-1. In Render, create a **Web Service** from this repository. Set the root
-   directory to `backend` and select **Docker**. Add a persistent disk mounted
-   at `/var/data`.
-2. Set `DATABASE_URL` to `sqlite+aiosqlite:////var/data/invoices.db`,
-   `UPLOAD_DIR` to `/var/data/uploads`, and `ENVIRONMENT` to `production`.
-   Once the service is live, copy its URL (for example,
+1. In Render, create an API **Web Service** and a separate **Background Worker**
+   from `backend`; run `python -m app.worker` in the worker service.
+2. Set `DATABASE_URL` to your Supabase/Postgres `postgresql+asyncpg://` URL,
+   `STORAGE_BACKEND=supabase`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and
+   `ENVIRONMENT=production` in both services. Once the API is live, copy its URL (for example,
    `https://invoice-extraction-api.onrender.com`).
+
+If a paid Background Worker is not available, set `EMBEDDED_WORKER_ENABLED=true`
+on the Web Service instead. This free-tier mode runs the durable worker alongside
+the API; queued jobs survive restarts, but processing pauses while Render spins
+the service down after inactivity.
 3. In Vercel, import the same repository and set **Root Directory** to
    `frontend`. Add `NEXT_PUBLIC_API_URL` with the Render API URL, then deploy.
 4. Back in Render, set `CORS_ORIGINS` to a JSON list containing the Vercel URL,
@@ -114,11 +122,11 @@ pip install -e ".[paddleocr]"
 OCR_ENGINE=paddleocr uvicorn app.main:app
 ```
 
-Gemini is only called when `VLM_ENABLED=true`, a key is configured, and deterministic confidence is below `VLM_CONFIDENCE_THRESHOLD` or required fields are absent:
+Gemini verification runs in parallel with OCR/layout extraction when `GEMINI_API_KEY` is configured. The API key is sent in an HTTP header, never in a URL:
 
 ```bash
 pip install -e ".[vlm]"
-VLM_ENABLED=true GEMINI_API_KEY=... uvicorn app.main:app
+GEMINI_API_KEY=... uvicorn app.main:app
 ```
 
 ## Authentication

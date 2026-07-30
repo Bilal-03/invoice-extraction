@@ -32,7 +32,7 @@ from app.api.v1 import deps
 from app.core.config import Settings, get_settings
 from app.core.database import async_session_factory, get_db_session
 from app.core.logging import get_logger
-from app.core.security import verify_auth
+from app.core.security import get_tenant_id, verify_auth
 from app.core.uploads import validate_upload
 from app.domain.entities import AuditEntryModel, Document, DocumentEvent, DocumentJob
 from app.domain.schemas import (
@@ -76,6 +76,7 @@ async def _accept_upload(
     db: AsyncSession,
     storage: ObjectStorage,
     settings: Settings,
+    tenant_id: str,
 ) -> tuple[DocumentUploadResponse, Document | None]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -84,7 +85,7 @@ async def _accept_upload(
 
     duplicate = await db.scalar(
         select(Document)
-        .where(Document.document_hash == document_hash)
+        .where(Document.document_hash == document_hash, Document.tenant_id == tenant_id)
         .order_by(desc(Document.created_at))
         .limit(1)
     )
@@ -108,6 +109,7 @@ async def _accept_upload(
         file_path="",
         file_size_bytes=len(file_bytes),
         document_hash=document_hash,
+        tenant_id=tenant_id,
     )
     db.add(doc)
     await db.flush()
@@ -134,16 +136,19 @@ async def upload_document(
     ocr_engine: OCREngine = Depends(deps.get_ocr_engine),
     vlm_client: VLMClient | None = Depends(deps.get_vlm_client),
     settings: Settings = Depends(get_settings),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """
     Upload an invoice image or PDF for processing.
 
     Returns 202 Accepted immediately. Processing happens in the background.
     """
-    response, doc = await _accept_upload(file, db, storage, settings)
+    response, doc = await _accept_upload(file, db, storage, settings, tenant_id)
     if doc:
         logger.info("document_uploaded", document_id=doc.id, filename=doc.filename)
-        await enqueue_document(db, doc.id, max_attempts=settings.worker_max_attempts)
+        await enqueue_document(
+            db, doc.id, tenant_id=tenant_id, max_attempts=settings.worker_max_attempts
+        )
         await db.commit()
     return response
 
@@ -156,15 +161,18 @@ async def upload_document_batch(
     ocr_engine: OCREngine = Depends(deps.get_ocr_engine),
     vlm_client: VLMClient | None = Depends(deps.get_vlm_client),
     settings: Settings = Depends(get_settings),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     if not files or len(files) > 25:
         raise HTTPException(status_code=400, detail="Upload between 1 and 25 documents")
     responses = []
     for file in files:
-        response, doc = await _accept_upload(file, db, storage, settings)
+        response, doc = await _accept_upload(file, db, storage, settings, tenant_id)
         responses.append(response)
         if doc:
-            await enqueue_document(db, doc.id, max_attempts=settings.worker_max_attempts)
+            await enqueue_document(
+                db, doc.id, tenant_id=tenant_id, max_attempts=settings.worker_max_attempts
+            )
     await db.commit()
     return BatchUploadResponse(documents=responses, accepted=len(responses))
 
@@ -175,9 +183,10 @@ async def get_document_preview(
     page: int = Query(1, ge=1),
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Render a browser-safe PNG preview for an image or individual PDF page."""
-    document = await db.scalar(select(Document).where(Document.id == document_id))
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     file_bytes = await storage.download(document.file_path)
@@ -206,9 +215,10 @@ async def list_documents(
     date_to: date | None = None,
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """List documents with pagination and filtering."""
-    stmt = select(Document)
+    stmt = select(Document).where(Document.tenant_id == tenant_id)
 
     if status:
         if status not in {value.value for value in DocumentStatus}:
@@ -248,9 +258,10 @@ async def get_document(
     document_id: str,
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Get a specific document by ID, including its extraction results."""
-    stmt = select(Document).where(Document.id == document_id)
+    stmt = select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
     result = await db.execute(stmt)
     doc = result.scalar_one_or_none()
 
@@ -267,6 +278,7 @@ async def correct_field(
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
     actor: str | None = Depends(verify_auth),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """
     Human correction endpoint.
@@ -274,7 +286,7 @@ async def correct_field(
     Updates a specific field in the extraction result and writes
     an audit trail entry. This is a crucial feature for enterprise IDP.
     """
-    stmt = select(Document).where(Document.id == document_id)
+    stmt = select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
     result = await db.execute(stmt)
     doc = result.scalar_one_or_none()
 
@@ -331,6 +343,7 @@ async def correct_field(
     # Create audit entry
     audit = AuditEntryModel(
         document_id=document_id,
+        tenant_id=tenant_id,
         field_path=request.field_path,
         old_value=None if server_old_value is None else str(server_old_value),
         new_value=request.new_value,
@@ -348,11 +361,12 @@ async def correct_field(
 async def get_document_audit_trail(
     document_id: str,
     db: AsyncSession = Depends(get_db_session),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Get the human correction history for a document."""
     stmt = (
         select(AuditEntryModel)
-        .where(AuditEntryModel.document_id == document_id)
+        .where(AuditEntryModel.document_id == document_id, AuditEntryModel.tenant_id == tenant_id)
         .order_by(desc(AuditEntryModel.timestamp))
     )
     result = await db.execute(stmt)
@@ -373,14 +387,14 @@ async def get_document_audit_trail(
 
 
 @router.get("/{document_id}/events")
-async def stream_document_status(document_id: str):
-    """SSE fallback; production clients should subscribe to Supabase Realtime events."""
+async def stream_document_status(document_id: str, tenant_id: str = Depends(get_tenant_id)):
+    """Stream scoped document status changes to the review UI over SSE."""
 
     async def event_stream():
         previous = None
         for _ in range(300):
             async with async_session_factory() as session:
-                doc = await session.scalar(select(Document).where(Document.id == document_id))
+                doc = await session.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
                 if not doc:
                     yield 'event: error\ndata: {"detail":"Document not found"}\n\n'
                     return
@@ -409,11 +423,12 @@ async def stream_document_status(document_id: str):
 async def get_document_events(
     document_id: str,
     db: AsyncSession = Depends(get_db_session),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Return the durable job timeline used by the dashboard and support tooling."""
     rows = await db.scalars(
         select(DocumentEvent)
-        .where(DocumentEvent.document_id == document_id)
+        .where(DocumentEvent.document_id == document_id, DocumentEvent.tenant_id == tenant_id)
         .order_by(DocumentEvent.created_at)
     )
     return [
@@ -434,9 +449,10 @@ async def reprocess_document(
     document_id: str,
     db: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Queue a new attempt without discarding the prior extraction or audit trail."""
-    document = await db.scalar(select(Document).where(Document.id == document_id))
+    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     active_job = await db.scalar(
@@ -459,9 +475,14 @@ async def reprocess_document(
 @router.get("/file/{storage_key}")
 async def get_document_file(
     storage_key: str,
+    db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
+    tenant_id: str = Depends(get_tenant_id),
 ):
     """Serve the raw uploaded file. Needed for the frontend preview."""
+    owner = await db.scalar(select(Document).where(Document.file_path == storage_key, Document.tenant_id == tenant_id))
+    if not owner:
+        raise HTTPException(status_code=404, detail="File not found")
     if hasattr(storage, "base_dir"):
         try:
             path = storage._resolve_path(storage_key)

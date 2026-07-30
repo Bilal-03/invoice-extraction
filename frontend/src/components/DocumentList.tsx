@@ -51,11 +51,7 @@ export function DocumentList({ onSelectDoc }: DocumentListProps) {
 
   useEffect(() => {
     const debounce = window.setTimeout(fetchDocuments, 250);
-    const refresh = window.setInterval(fetchDocuments, 5000);
-    return () => {
-      window.clearTimeout(debounce);
-      window.clearInterval(refresh);
-    };
+    return () => window.clearTimeout(debounce);
   }, [fetchDocuments]);
 
   const getStatusBadge = (status: string) => {

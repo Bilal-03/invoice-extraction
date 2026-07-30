@@ -165,6 +165,8 @@ class InvoiceExtraction(BaseModel):
     overall_confidence: float = Field(ge=0.0, le=1.0, default=0.0)
     validation_flags: list[ValidationFlag] = Field(default_factory=list)
     extraction_source: ExtractionSource = ExtractionSource.OCR_REGEX
+    # AI can locate scalar values even when OCR did not produce a word box.
+    field_locations: dict[str, BoundingBox] = Field(default_factory=dict)
     processing_time_ms: int = 0
     vlm_input_tokens: int = 0
     vlm_output_tokens: int = 0

@@ -21,38 +21,40 @@ from app.domain.schemas import (
 class AnalyticsService:
     """Service for generating dashboard analytics."""
 
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, tenant_id: str = "local"):
         self.session = session
+        self.tenant_id = tenant_id
 
     async def get_summary(self) -> AnalyticsSummary:
         """Get high-level platform metrics."""
 
         # Basic counts
-        stmt = select(func.count(Document.id))
+        scope = Document.tenant_id == self.tenant_id
+        stmt = select(func.count(Document.id)).where(scope)
         total = await self.session.scalar(stmt) or 0
 
         stmt = select(func.count(Document.id)).where(
-            Document.status == DocumentStatus.COMPLETED.value
+            scope, Document.status == DocumentStatus.COMPLETED.value
         )
         completed = await self.session.scalar(stmt) or 0
 
-        stmt = select(func.count(Document.id)).where(Document.status == DocumentStatus.FAILED.value)
+        stmt = select(func.count(Document.id)).where(scope, Document.status == DocumentStatus.FAILED.value)
         failed = await self.session.scalar(stmt) or 0
 
         # Averages (only for completed documents)
         stmt_avg_conf = select(func.avg(Document.overall_confidence)).where(
-            Document.status == DocumentStatus.COMPLETED.value
+            scope, Document.status == DocumentStatus.COMPLETED.value
         )
         avg_conf = await self.session.scalar(stmt_avg_conf) or 0.0
 
         stmt_avg_time = select(func.avg(Document.processing_time_ms)).where(
-            Document.status == DocumentStatus.COMPLETED.value
+            scope, Document.status == DocumentStatus.COMPLETED.value
         )
         avg_time = await self.session.scalar(stmt_avg_time) or 0.0
 
         # VLM Fallback rate
         stmt_vlm = select(func.count(Document.id)).where(
-            Document.extraction_source == "vlm_fallback",
+            scope, Document.extraction_source == "vlm_fallback",
             Document.status == DocumentStatus.COMPLETED.value,
         )
         vlm_count = await self.session.scalar(stmt_vlm) or 0
@@ -63,14 +65,15 @@ class AnalyticsService:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
 
-        stmt_today = select(func.count(Document.id)).where(Document.created_at >= today_start)
+        stmt_today = select(func.count(Document.id)).where(scope, Document.created_at >= today_start)
         today_count = await self.session.scalar(stmt_today) or 0
 
-        stmt_week = select(func.count(Document.id)).where(Document.created_at >= week_start)
+        stmt_week = select(func.count(Document.id)).where(scope, Document.created_at >= week_start)
         week_count = await self.session.scalar(stmt_week) or 0
 
         extraction_rows = await self.session.scalars(
             select(Document.extraction_result).where(
+                scope,
                 Document.status == DocumentStatus.COMPLETED.value,
                 Document.extraction_result.is_not(None),
             )
@@ -101,6 +104,7 @@ class AnalyticsService:
                 func.avg(Document.overall_confidence).label("avg_conf"),
             )
             .where(
+                Document.tenant_id == self.tenant_id,
                 Document.status == DocumentStatus.COMPLETED.value,
                 Document.vendor_name.is_not(None),
                 Document.vendor_name != "",
@@ -135,7 +139,7 @@ class AnalyticsService:
                 Document.created_at,
                 Document.overall_confidence,
                 Document.processing_time_ms,
-            ).where(Document.created_at >= cutoff)
+            ).where(Document.tenant_id == self.tenant_id, Document.created_at >= cutoff)
         )
         buckets: dict[str, list[tuple[float, float]]] = {}
         for created_at, confidence, processing_time in result.all():

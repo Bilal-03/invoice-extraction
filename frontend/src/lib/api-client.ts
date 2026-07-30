@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 // Get the base URL from environment or fallback to localhost
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export const apiClient = axios.create({
   baseURL: `${API_BASE_URL}/api/v1`,
@@ -99,6 +99,7 @@ export interface InvoiceExtraction {
   currency: string;
   overall_confidence: number;
   extraction_source?: string;
+  field_locations: Record<string, BoundingBox>;
   validation_flags: ValidationFlag[];
   processing_time_ms: number;
   vlm_input_tokens: number;

@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { Check, ChevronRight, FileUp, Loader2, RefreshCw, Sparkles } from "lucide-react";
-import { apiClient, DocumentResponse, FieldValue, InvoiceExtraction, resolveFileUrl } from "@/lib/api-client";
+import { API_BASE_URL, apiClient, BoundingBox, DocumentResponse, FieldValue, InvoiceExtraction, resolveFileUrl } from "@/lib/api-client";
 
 type View = "inbox" | "review" | "insights";
-type FieldSpec = { label: string; path: string; field?: FieldValue | null; value?: string | null; conflict?: boolean };
+type FieldSpec = { label: string; path: string; field?: FieldValue | null; value?: string | null; conflict?: boolean; boundingBox?: BoundingBox | null };
 
 const processingStates = ["pending", "preprocessing", "ocr", "extracting", "validating"];
 
@@ -54,8 +54,31 @@ export function Dashboard() {
   useEffect(() => { loadDocuments(); }, [loadDocuments]);
   useEffect(() => {
     if (!currentDoc || !processingStates.includes(currentDoc.status)) return;
-    const timer = window.setInterval(loadDocuments, 2000);
-    return () => window.clearInterval(timer);
+    const controller = new AbortController();
+    const stream = async () => {
+      const headers: Record<string, string> = { Accept: "text/event-stream" };
+      const token = window.localStorage.getItem("invoice_access_token");
+      const apiKey = window.localStorage.getItem("invoice_api_key");
+      if (token) headers.Authorization = `Bearer ${token}`;
+      if (apiKey) headers["X-API-Key"] = apiKey;
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/v1/documents/${currentDoc.id}/events`, { headers, signal: controller.signal, cache: "no-store" });
+        if (!response.ok || !response.body) throw new Error(`SSE connection failed (${response.status})`);
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+        while (!controller.signal.aborted) {
+          const chunk = await reader.read(); if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const events = buffer.split("\n\n"); buffer = events.pop() || "";
+          for (const event of events) {
+            const line = event.split("\n").find((part) => part.startsWith("data:"));
+            if (!line) continue;
+            try { const payload = JSON.parse(line.slice(5).trim()); if (payload.document_id === currentDoc.id) { await loadDocuments(); if (["completed", "failed"].includes(payload.status)) controller.abort(); } } catch (error) { console.error("Invalid document event", error); }
+          }
+        }
+      } catch (error) { if (!controller.signal.aborted) console.error("Document event stream ended", error); }
+    };
+    void stream();
+    return () => controller.abort();
   }, [currentDoc, loadDocuments]);
 
   const onDrop = useCallback(async (files: File[]) => {
@@ -117,9 +140,9 @@ function Review({ doc, onUpdated }: { doc: DocumentResponse | null; onUpdated: (
   if (doc.status === "failed") return <section className="empty-review"><h1>Extraction needs attention</h1><p className="subtext">{doc.error_message || "The document could not be processed."}</p></section>;
   const x = doc.extraction; const score = Math.round(x.overall_confidence * 100); const needsReview = x.validation_flags.filter((flag) => !flag.passed).length;
   const fields: FieldSpec[] = [
-    { label: "Invoice number", path: "invoice_number.value", field: x.invoice_number }, { label: "Invoice date", path: "invoice_date", value: x.invoice_date }, { label: "PO reference", path: "po_reference.value", field: x.po_reference },
-    { label: "Vendor name", path: "vendor.name.value", field: x.vendor.name }, { label: "Vendor address", path: "vendor.address.value", field: x.vendor.address, conflict: Boolean(x.validation_flags.some((flag) => !flag.passed && /address/i.test(flag.message))) },
-    { label: "Billed to", path: "buyer.name.value", field: x.buyer?.name }, { label: "Shipping address", path: "buyer.shipping_address.value", field: x.buyer?.shipping_address },
+    { label: "Invoice number", path: "invoice_number.value", field: x.invoice_number, boundingBox: x.field_locations.invoice_number }, { label: "Invoice date", path: "invoice_date", value: x.invoice_date, boundingBox: x.field_locations.invoice_date }, { label: "PO reference", path: "po_reference.value", field: x.po_reference, boundingBox: x.field_locations.po_reference },
+    { label: "Vendor name", path: "vendor.name.value", field: x.vendor.name, boundingBox: x.field_locations.vendor_name }, { label: "Vendor address", path: "vendor.address.value", field: x.vendor.address, boundingBox: x.field_locations.vendor_address, conflict: Boolean(x.validation_flags.some((flag) => !flag.passed && /address/i.test(flag.message))) },
+    { label: "Billed to", path: "buyer.name.value", field: x.buyer?.name, boundingBox: x.field_locations.buyer_name }, { label: "Shipping address", path: "buyer.shipping_address.value", field: x.buyer?.shipping_address, boundingBox: x.field_locations.buyer_shipping_address },
   ];
   const save = async (path: string, oldValue: string | null, newValue: string) => { try { const result = await apiClient.patch<DocumentResponse>(`/documents/${doc.id}/fields`, { field_path: path, old_value: oldValue, new_value: newValue, corrected_by: "human_user" }); onUpdated(result.data); } catch (error) { console.error("Could not save field", error); } };
   return <section className="review-view view-enter"><div className="review-header"><div><span className="eyebrow">{doc.filename} · page 1 of {doc.page_count}</span><h1>{x.vendor.name.value || "Invoice review"} — {x.invoice_number.value || "Unnumbered"}</h1></div><div className="review-confidence"><Ring value={score} size={48} /><span><b>{score}% overall</b><br />confidence {needsReview ? `— ${needsReview} signals need a look` : "— ready to approve"}</span></div><button className="outline-action"><Sparkles size={15} /> Re-verify</button><button className="approve-action"><Check size={15} /> Approve & export</button></div>
@@ -129,7 +152,7 @@ function Review({ doc, onUpdated }: { doc: DocumentResponse | null; onUpdated: (
 }
 
 function DocumentSource({ previewUrl, fields, activePath }: { previewUrl: string; fields: FieldSpec[]; activePath: string }) {
-  return <aside className="source-panel"><div className="source-toolbar"><span className="eyebrow">Source document</span><span>Page 1/1 · Zoom 100%</span></div><div className="invoice-canvas" style={previewUrl ? { backgroundImage: `url(${previewUrl})` } : undefined}>{!previewUrl && <div className="paper-placeholder"><b>INVOICE</b><span>Source preview will appear here</span><i /><i /><i /><i /></div>}{fields.map((field, index) => field.field?.bounding_box && <span key={field.path} className={`source-highlight ${activePath === field.path ? "active" : ""}`} style={{ left: `${field.field.bounding_box.x0 * 100}%`, top: `${field.field.bounding_box.y0 * 100}%`, width: `${(field.field.bounding_box.x1 - field.field.bounding_box.x0) * 100}%`, height: `${(field.field.bounding_box.y1 - field.field.bounding_box.y0) * 100}%` }} />)}{!previewUrl && activePath && <span className="demo-highlight active" style={{ top: `${24 + (fields.findIndex((f) => f.path === activePath) % 5) * 12}%` }} />}</div><div className="source-legend"><span><i className="legend-agree" /> OCR + Gemini agree</span><span><i className="legend-ai" /> Gemini-only</span><span><i className="legend-review" /> Needs review</span></div></aside>;
+  return <aside className="source-panel"><div className="source-toolbar"><span className="eyebrow">Source document</span><span>Page 1/1 · Zoom 100%</span></div><div className="invoice-canvas" style={previewUrl ? { backgroundImage: `url(${previewUrl})` } : undefined}>{!previewUrl && <div className="paper-placeholder"><b>INVOICE</b><span>Source preview will appear here</span><i /><i /><i /><i /></div>}{fields.map((field) => { const box = field.field?.bounding_box || field.boundingBox; return box && <span key={field.path} className={`source-highlight ${activePath === field.path ? "active" : ""}`} style={{ left: `${box.x0 * 100}%`, top: `${box.y0 * 100}%`, width: `${(box.x1 - box.x0) * 100}%`, height: `${(box.y1 - box.y0) * 100}%` }} />; })}{!previewUrl && activePath && <span className="demo-highlight active" style={{ top: `${24 + (fields.findIndex((f) => f.path === activePath) % 5) * 12}%` }} />}</div><div className="source-legend"><span><i className="legend-agree" /> OCR + Gemini agree</span><span><i className="legend-ai" /> Gemini-only</span><span><i className="legend-review" /> Needs review</span></div></aside>;
 }
 
 function FieldSection({ title, fields, activePath, setActivePath, onSave, onConflict }: { title: string; fields: FieldSpec[]; activePath: string; setActivePath: (path: string) => void; onSave: (path: string, oldValue: string | null, value: string) => void; onConflict?: () => void }) { return <div className="field-section"><h2>{title}</h2>{fields.map((spec) => <FieldRow key={spec.path} {...spec} active={activePath === spec.path} onFocus={() => setActivePath(spec.path)} onBlur={() => setActivePath("")} onSave={onSave} onConflict={onConflict} />)}</div>; }

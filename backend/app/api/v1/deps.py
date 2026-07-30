@@ -31,6 +31,9 @@ _VLM_INSTANCE: VLMClient | None = None
 def build_storage(settings: Settings) -> ObjectStorage:
     if settings.storage_backend == StorageBackend.SUPABASE:
         if not settings.supabase_url or not settings.supabase_service_role_key:
+            if settings.environment.value == "development":
+                logger.warning("supabase_storage_not_configured_using_explicit_dev_local_storage")
+                return LocalStorage(base_dir=settings.upload_dir)
             raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
         return SupabaseStorage(
             settings.supabase_url,

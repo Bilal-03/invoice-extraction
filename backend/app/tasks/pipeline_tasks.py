@@ -1,9 +1,4 @@
-"""
-Background task for the document extraction pipeline.
-
-Runs in FastAPI's built-in background task system so the application needs no
-queue server or worker process.
-"""
+"""Extraction pipeline executed exclusively by the durable worker."""
 
 import asyncio
 
@@ -16,6 +11,7 @@ from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.logging import get_logger
 from app.core.metrics import record_document
+from app.core.tracing import stage_span
 from app.domain.entities import Document
 from app.domain.schemas import DocumentStatus, ValidationFlag, ValidationSeverity
 from app.services.extraction_service import ExtractionService
@@ -25,23 +21,6 @@ logger = get_logger(__name__)
 _pipeline_slots = asyncio.Semaphore(get_settings().pipeline_max_concurrency)
 
 
-async def dispatch_extraction_pipeline(
-    background_tasks,
-    document_id: str,
-    storage: ObjectStorage,
-    ocr_engine: OCREngine,
-    vlm_client: VLMClient | None,
-) -> None:
-    """Schedule extraction in the API process after the upload response is sent."""
-    background_tasks.add_task(
-        run_extraction_pipeline,
-        document_id=document_id,
-        storage=storage,
-        ocr_engine=ocr_engine,
-        vlm_client=vlm_client,
-    )
-
-
 async def run_extraction_pipeline(
     document_id: str,
     storage: ObjectStorage,
@@ -49,15 +28,16 @@ async def run_extraction_pipeline(
     vlm_client: VLMClient | None = None,
 ) -> None:
     """
-    Run the full extraction pipeline as a background task.
+    Run the full extraction pipeline after a durable job has been claimed.
 
     1. Fetch document from DB
     2. Download image bytes from storage
     3. Run ExtractionService
     4. Save results back to DB
     """
-    async with _pipeline_slots:
-        await _run_extraction_pipeline(document_id, storage, ocr_engine, vlm_client)
+    with stage_span("invoice.pipeline", document_id=document_id):
+        async with _pipeline_slots:
+            await _run_extraction_pipeline(document_id, storage, ocr_engine, vlm_client)
 
 
 async def _run_extraction_pipeline(
@@ -67,6 +47,7 @@ async def _run_extraction_pipeline(
     vlm_client: VLMClient | None = None,
 ) -> None:
     """Process one job after acquiring a bounded local worker slot."""
+    settings = get_settings()
     logger.info("pipeline_started", document_id=document_id)
 
     async with async_session_factory() as session:
@@ -85,12 +66,14 @@ async def _run_extraction_pipeline(
             await session.commit()
 
             # Fetch image bytes
-            file_bytes = await storage.download(document.file_path)
+            with stage_span("invoice.storage_download", storage_key=document.file_path):
+                file_bytes = await storage.download(document.file_path)
 
             # Decode every page so multi-page invoices remain one logical document.
             from app.adapters.preprocessing.pipeline import (
                 extract_pdf_ocr_result,
                 load_image_from_bytes,
+                load_pdf_page,
                 load_pdf_pages,
             )
 
@@ -134,7 +117,11 @@ async def _run_extraction_pipeline(
                 await session.commit()
 
             extraction_result = (
-                await service.extract_from_ocr_result(native_ocr, update_status)
+                await service.extract_from_ocr_result(
+                    native_ocr,
+                    update_status,
+                    verification_image=load_pdf_page(file_bytes, 0) if settings.vlm_enabled else None,
+                )
                 if native_ocr
                 else await service.extract_from_images(images, update_status, text_hint=text_hint)
             )
@@ -146,6 +133,7 @@ async def _run_extraction_pipeline(
                 candidates = await session.scalars(
                     select(Document).where(
                         Document.id != document_id,
+                        Document.tenant_id == document.tenant_id,
                         Document.vendor_name == vendor_name,
                         Document.status == DocumentStatus.COMPLETED.value,
                     )
@@ -165,10 +153,11 @@ async def _run_extraction_pipeline(
                         break
 
             # Save results
-            document.extraction_result = extraction_result.model_dump(mode="json")
-            document.overall_confidence = extraction_result.overall_confidence
-            document.processing_time_ms = extraction_result.processing_time_ms
-            document.extraction_source = extraction_result.extraction_source.value
+            with stage_span("invoice.persist_extraction", document_id=document.id):
+                document.extraction_result = extraction_result.model_dump(mode="json")
+                document.overall_confidence = extraction_result.overall_confidence
+                document.processing_time_ms = extraction_result.processing_time_ms
+                document.extraction_source = extraction_result.extraction_source.value
 
             # Denormalise key fields for dashboard filtering/analytics
             if extraction_result.vendor.name.value:

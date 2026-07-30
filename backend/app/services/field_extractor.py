@@ -29,6 +29,10 @@ from app.domain.schemas import (
     TaxType,
     VendorDetails,
 )
+from app.services.extractors.amounts import AmountExtractor
+from app.services.extractors.dates import DateExtractor
+from app.services.extractors.line_items import LineItemExtractor
+from app.services.extractors.parties import PartyExtractor
 
 logger = get_logger(__name__)
 
@@ -138,10 +142,18 @@ class FieldExtractor:
         words = ocr_result.words
         lines = ocr_result.lines()
 
+        # Family boundaries are explicit even while the mature regex matchers
+        # remain on this compatibility class. Each family can now move behind
+        # its own protocol implementation without changing the schema.
+        dates = DateExtractor(self).extract(ocr_result)
+        parties = PartyExtractor(self).extract(ocr_result)
+        amounts = AmountExtractor(self).extract(ocr_result)
+        line_items = LineItemExtractor(self).extract(ocr_result)
+
         # Extract each field group
         invoice_number = self._extract_invoice_number(text, words)
-        invoice_date = self._extract_date(text, words, INVOICE_DATE_LABELS)
-        due_date = self._extract_date(text, words, DUE_DATE_LABELS, allow_fallback=False)
+        invoice_date = dates["invoice_date"]
+        due_date = dates["due_date"]
         po_reference = self._extract_labeled_value(
             text,
             [
@@ -156,12 +168,11 @@ class FieldExtractor:
         payment_terms = self._extract_labeled_text(
             text, r"(?:payment terms?|terms)\s*[:\-]\s*([^\n\r]{2,80})"
         )
-        vendor = self._extract_vendor(text, words, lines)
-        buyer = self._extract_buyer(text, lines)
-        taxes = self._extract_taxes(text)
-        line_items = self._extract_line_items(text, lines)
-        grand_total = self._extract_grand_total(text)
-        subtotal = self._extract_amount(text, words, SUBTOTAL_LABELS)
+        vendor = parties["vendor"]
+        buyer = parties["buyer"]
+        taxes = amounts["taxes"]
+        grand_total = amounts["grand_total"]
+        subtotal = amounts["subtotal"]
         subtotal_value = (
             Decimal(str(self._parse_number(subtotal.value)))
             if subtotal and subtotal.value
@@ -169,9 +180,7 @@ class FieldExtractor:
         )
         tax_total = sum((tax.amount for tax in taxes), Decimal("0"))
         discount_total = sum((item.discount for item in line_items), Decimal("0"))
-        shipping_amount = self._extract_labeled_decimal(
-            text, ["shipping charge", "shipping fee", "freight", "delivery charge"]
-        )
+        shipping_amount = amounts["shipping_amount"]
         if (
             grand_total is not None
             and subtotal_value is not None
@@ -182,7 +191,7 @@ class FieldExtractor:
             # amount fallback selects the pre-tax net amount. The table's
             # independently reconstructed arithmetic is stronger evidence.
             grand_total = subtotal_value + tax_total + shipping_amount
-        currency = self._detect_currency(text)
+        currency = amounts["currency"]
 
         # Compute overall confidence
         field_confidences = [

@@ -6,7 +6,7 @@ import hmac
 import json
 import time
 
-from fastapi import Depends, HTTPException, Security, status
+from fastapi import Depends, Header, HTTPException, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import Settings, get_settings
@@ -106,3 +106,25 @@ async def verify_auth(
         detail="Invalid or missing credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+async def get_tenant_id(
+    actor: str | None = Depends(verify_auth),
+    requested_tenant: str | None = Header(default=None, alias="X-Tenant-ID"),
+    settings: Settings = Depends(get_settings),
+) -> str:
+    """Resolve the tenant scope for every data access.
+
+    JWT subjects are tenant principals. A configured API key is mapped to the
+    single tenant configured by ``API_KEY_TENANT_ID``. Local, unauthenticated
+    development may use ``X-Tenant-ID`` for test isolation.
+    """
+    if actor and actor != "api_key":
+        return actor
+    if actor == "api_key":
+        return settings.api_key_tenant_id
+    if requested_tenant and not actor:
+        if len(requested_tenant) > 64 or any(ch.isspace() for ch in requested_tenant):
+            raise HTTPException(status_code=400, detail="Invalid tenant identifier")
+        return requested_tenant
+    return "local"

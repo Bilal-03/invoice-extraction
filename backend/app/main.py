@@ -19,6 +19,7 @@ from app.core.config import get_settings
 from app.core.database import async_session_factory, init_db
 from app.core.logging import get_logger, setup_logging
 from app.core.metrics import render_metrics
+from app.core.tracing import configure_tracing, shutdown_tracing
 
 # Initialize structlog before creating the app
 setup_logging()
@@ -44,12 +45,12 @@ async def lifespan(app: FastAPI):
 
     worker_task: asyncio.Task[None] | None = None
     if settings.embedded_worker_enabled:
-        # For a single free Render web service, this avoids requiring a second
-        # always-running worker. Jobs remain durable in Postgres across restarts.
+        # Budget mode for a single Render Web Service. Jobs remain durable in
+        # Postgres, but OCR shares this process and stops when Render sleeps it.
         from app.worker import run_worker
 
         worker_task = asyncio.create_task(run_worker(), name="embedded-document-worker")
-        logger.info("embedded_worker_started")
+        logger.warning("embedded_worker_started", mode="single_service_budget_mode")
 
     try:
         yield
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
             worker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await worker_task
+        shutdown_tracing()
 
     # Shutdown
     logger.info("application_shutdown")
@@ -74,6 +76,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url=None,
 )
+configure_tracing(app)
 
 limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
 app.state.limiter = limiter

@@ -2,11 +2,13 @@
 
 import asyncio
 import socket
+from datetime import UTC, datetime
 
 from app.api.v1.deps import build_ocr_engine, build_storage, build_vlm_client
 from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.logging import get_logger, setup_logging
+from app.core.tracing import stage_span
 from app.domain.entities import Document
 from app.services.job_service import claim_next_job, complete_job, fail_job
 from app.tasks.pipeline_tasks import run_extraction_pipeline
@@ -25,14 +27,27 @@ async def run_worker() -> None:
 
     while True:
         async with async_session_factory() as session:
-            job = await claim_next_job(session, worker_id)
+            with stage_span("invoice.queue_claim", worker_id=worker_id):
+                job = await claim_next_job(session, worker_id)
             await session.commit()
         if not job:
             await asyncio.sleep(settings.worker_poll_interval_seconds)
             continue
 
         try:
-            await run_extraction_pipeline(job.document_id, storage, ocr_engine, vlm_client)
+            created_at = job.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            with stage_span(
+                "invoice.worker_job",
+                job_id=job.id,
+                document_id=job.document_id,
+                attempt=job.attempt_count,
+                queue_wait_seconds=max(
+                    0.0, (datetime.now(UTC) - created_at).total_seconds()
+                ),
+            ):
+                await run_extraction_pipeline(job.document_id, storage, ocr_engine, vlm_client)
             async with async_session_factory() as session:
                 fresh_job = await session.get(type(job), job.id)
                 document = await session.get(Document, job.document_id)
