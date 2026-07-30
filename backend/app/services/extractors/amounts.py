@@ -19,7 +19,14 @@ class AmountExtractor(Extractor):
         subtotal = self._legacy._extract_amount(
             text,
             words,
-            ["subtotal", "sub total", "sub-total", "amount before tax", "taxable amount", "net total"],
+            [
+                "subtotal",
+                "sub total",
+                "sub-total",
+                "amount before tax",
+                "taxable amount",
+                "net total",
+            ],
         )
         return {
             "taxes": taxes,

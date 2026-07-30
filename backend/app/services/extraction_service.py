@@ -115,7 +115,9 @@ class ExtractionService:
             # 2. OCR every page and combine results without destroying layout metadata
             logger.info("pipeline_stage", stage="ocr", engine=self.ocr_engine.name)
             await report(DocumentStatus.OCR)
-            with stage_span("invoice.ocr", page_count=len(processed_pages), ocr_engine=self.ocr_engine.name):
+            with stage_span(
+                "invoice.ocr", page_count=len(processed_pages), ocr_engine=self.ocr_engine.name
+            ):
                 page_results = []
                 for page_index, processed_image in enumerate(processed_pages):
                     result = await self.ocr_engine.extract(processed_image)
@@ -195,7 +197,9 @@ class ExtractionService:
         if image is None or not self.settings.vlm_enabled or not self.vlm_client:
             return None
         logger.info("pipeline_stage", stage="gemini_verification", mode="parallel")
-        return asyncio.create_task(self.vlm_client.extract_fields(image), name="gemini-verification")
+        return asyncio.create_task(
+            self.vlm_client.extract_fields(image), name="gemini-verification"
+        )
 
     async def _merge_verification(
         self, extraction: InvoiceExtraction, task: asyncio.Task[InvoiceExtraction] | None

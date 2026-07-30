@@ -140,7 +140,6 @@ class FieldExtractor:
         self._ocr_result = ocr_result
         text = ocr_result.raw_text
         words = ocr_result.words
-        lines = ocr_result.lines()
 
         # Family boundaries are explicit even while the mature regex matchers
         # remain on this compatibility class. Each family can now move behind
@@ -157,8 +156,7 @@ class FieldExtractor:
         po_reference = self._extract_labeled_value(
             text,
             [
-                r"order\s*(?:no|number|#)?\s*[:\-]\s*"
-                r"(\d{3}-\d{7}-\d{4,7}(?:\s+\d{1,3})?)",
+                r"order\s*(?:no|number|#)?\s*[:\-]\s*" r"(\d{3}-\d{7}-\d{4,7}(?:\s+\d{1,3})?)",
                 r"(?:PO|purchase order|order)\s*(?:no|number|#)?\s*[:\-]\s*"
                 r"([A-Z0-9][A-Z0-9\-/ ]*?)(?=\s{2,}|\n|$)",
             ],
@@ -307,8 +305,7 @@ class FieldExtractor:
         gstin = None
 
         gstin_candidate = re.search(
-            r"(?:GST(?:IN|\s+Registration)?(?:\s+No)?\s*[:#-]?\s*)"
-            r"([A-Z0-9]{15})",
+            r"(?:GST(?:IN|\s+Registration)?(?:\s+No)?\s*[:#-]?\s*)" r"([A-Z0-9]{15})",
             text,
             re.IGNORECASE,
         )
@@ -826,10 +823,7 @@ class FieldExtractor:
 
     def _extract_labeled_decimal(self, text: str, labels: list[str]) -> Decimal:
         for label in labels:
-            pattern = (
-                rf"(?im)^\s*{re.escape(label)}\s*:?\s*"
-                r"[₹$€£]?\s*([\d,]+(?:\.\d{1,2})?)"
-            )
+            pattern = rf"(?im)^\s*{re.escape(label)}\s*:?\s*" r"[₹$€£]?\s*([\d,]+(?:\.\d{1,2})?)"
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 return Decimal(str(self._parse_number(match.group(1))))

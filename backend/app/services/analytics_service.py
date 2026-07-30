@@ -38,7 +38,9 @@ class AnalyticsService:
         )
         completed = await self.session.scalar(stmt) or 0
 
-        stmt = select(func.count(Document.id)).where(scope, Document.status == DocumentStatus.FAILED.value)
+        stmt = select(func.count(Document.id)).where(
+            scope, Document.status == DocumentStatus.FAILED.value
+        )
         failed = await self.session.scalar(stmt) or 0
 
         # Averages (only for completed documents)
@@ -54,7 +56,8 @@ class AnalyticsService:
 
         # VLM Fallback rate
         stmt_vlm = select(func.count(Document.id)).where(
-            scope, Document.extraction_source == "vlm_fallback",
+            scope,
+            Document.extraction_source == "vlm_fallback",
             Document.status == DocumentStatus.COMPLETED.value,
         )
         vlm_count = await self.session.scalar(stmt_vlm) or 0
@@ -65,7 +68,9 @@ class AnalyticsService:
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         week_start = today_start - timedelta(days=now.weekday())
 
-        stmt_today = select(func.count(Document.id)).where(scope, Document.created_at >= today_start)
+        stmt_today = select(func.count(Document.id)).where(
+            scope, Document.created_at >= today_start
+        )
         today_count = await self.session.scalar(stmt_today) or 0
 
         stmt_week = select(func.count(Document.id)).where(scope, Document.created_at >= week_start)

@@ -43,9 +43,7 @@ async def run_worker() -> None:
                 job_id=job.id,
                 document_id=job.document_id,
                 attempt=job.attempt_count,
-                queue_wait_seconds=max(
-                    0.0, (datetime.now(UTC) - created_at).total_seconds()
-                ),
+                queue_wait_seconds=max(0.0, (datetime.now(UTC) - created_at).total_seconds()),
             ):
                 await run_extraction_pipeline(job.document_id, storage, ocr_engine, vlm_client)
             async with async_session_factory() as session:

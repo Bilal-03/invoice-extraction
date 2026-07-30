@@ -116,15 +116,17 @@ async def _run_extraction_pipeline(
                 )
                 await session.commit()
 
-            extraction_result = (
-                await service.extract_from_ocr_result(
+            if native_ocr:
+                verification_image = load_pdf_page(file_bytes, 0) if settings.vlm_enabled else None
+                extraction_result = await service.extract_from_ocr_result(
                     native_ocr,
                     update_status,
-                    verification_image=load_pdf_page(file_bytes, 0) if settings.vlm_enabled else None,
+                    verification_image=verification_image,
                 )
-                if native_ocr
-                else await service.extract_from_images(images, update_status, text_hint=text_hint)
-            )
+            else:
+                extraction_result = await service.extract_from_images(
+                    images, update_status, text_hint=text_hint
+                )
 
             # Business-key duplicate detection catches re-scans whose bytes differ.
             vendor_name = extraction_result.vendor.name.value

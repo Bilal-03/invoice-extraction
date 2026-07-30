@@ -19,8 +19,8 @@ from app.adapters.vlm.base import VLMClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.domain.schemas import (
-    BuyerDetails,
     BoundingBox,
+    BuyerDetails,
     ExtractionSource,
     FieldValue,
     InvoiceExtraction,
@@ -158,10 +158,14 @@ class GeminiVLMClient(VLMClient):
             "generationConfig": {"maxOutputTokens": 2048, "response_mime_type": "application/json"},
         }
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        )
 
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload, headers={"x-goog-api-key": self.api_key})
+            response = await client.post(
+                url, json=payload, headers={"x-goog-api-key": self.api_key}
+            )
             response.raise_for_status()
 
         result = response.json()
@@ -278,7 +282,9 @@ class GeminiVLMClient(VLMClient):
             buyer=BuyerDetails(
                 name=_field(data.get("buyer_name"), "buyer_name"),
                 billing_address=_field(data.get("buyer_billing_address"), "buyer_billing_address"),
-                shipping_address=_field(data.get("buyer_shipping_address"), "buyer_shipping_address"),
+                shipping_address=_field(
+                    data.get("buyer_shipping_address"), "buyer_shipping_address"
+                ),
             )
             if any(
                 data.get(key)
@@ -302,8 +308,13 @@ class GeminiVLMClient(VLMClient):
             field_locations={
                 key: location
                 for key in (
-                    "invoice_date", "due_date", "payment_terms", "subtotal",
-                    "tax_total", "grand_total", "currency",
+                    "invoice_date",
+                    "due_date",
+                    "payment_terms",
+                    "subtotal",
+                    "tax_total",
+                    "grand_total",
+                    "currency",
                 )
                 if (location := _location(key)) is not None
             },

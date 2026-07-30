@@ -186,7 +186,9 @@ async def get_document_preview(
     tenant_id: str = Depends(get_tenant_id),
 ):
     """Render a browser-safe PNG preview for an image or individual PDF page."""
-    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     file_bytes = await storage.download(document.file_path)
@@ -394,7 +396,11 @@ async def stream_document_status(document_id: str, tenant_id: str = Depends(get_
         previous = None
         for _ in range(300):
             async with async_session_factory() as session:
-                doc = await session.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
+                doc = await session.scalar(
+                    select(Document).where(
+                        Document.id == document_id, Document.tenant_id == tenant_id
+                    )
+                )
                 if not doc:
                     yield 'event: error\ndata: {"detail":"Document not found"}\n\n'
                     return
@@ -452,7 +458,9 @@ async def reprocess_document(
     tenant_id: str = Depends(get_tenant_id),
 ):
     """Queue a new attempt without discarding the prior extraction or audit trail."""
-    document = await db.scalar(select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id))
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     active_job = await db.scalar(
@@ -480,7 +488,9 @@ async def get_document_file(
     tenant_id: str = Depends(get_tenant_id),
 ):
     """Serve the raw uploaded file. Needed for the frontend preview."""
-    owner = await db.scalar(select(Document).where(Document.file_path == storage_key, Document.tenant_id == tenant_id))
+    owner = await db.scalar(
+        select(Document).where(Document.file_path == storage_key, Document.tenant_id == tenant_id)
+    )
     if not owner:
         raise HTTPException(status_code=404, detail="File not found")
     if hasattr(storage, "base_dir"):

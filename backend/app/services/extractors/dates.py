@@ -19,7 +19,15 @@ class DateExtractor(Extractor):
             "invoice_date": self._legacy._extract_date(
                 text,
                 words,
-                ["invoice date", "inv date", "date of invoice", "billing date", "invoice dt", "dated", "date:"],
+                [
+                    "invoice date",
+                    "inv date",
+                    "date of invoice",
+                    "billing date",
+                    "invoice dt",
+                    "dated",
+                    "date:",
+                ],
             ),
             "due_date": self._legacy._extract_date(
                 text,
