@@ -7,6 +7,8 @@ and human correction audit trails.
 
 import asyncio
 import copy
+import csv
+import io
 import json
 import math
 from datetime import UTC, date, datetime, time
@@ -22,7 +24,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.ocr.base import OCREngine
@@ -466,6 +468,7 @@ async def reprocess_document(
     active_job = await db.scalar(
         select(DocumentJob).where(
             DocumentJob.document_id == document_id,
+            DocumentJob.tenant_id == tenant_id,
             DocumentJob.status.in_(["queued", "retrying", "processing"]),
         )
     )
@@ -473,11 +476,142 @@ async def reprocess_document(
         raise HTTPException(status_code=409, detail="Document already has an active job")
     document.status = DocumentStatus.PENDING.value
     document.error_message = None
+    document.extraction_result = None
+    document.overall_confidence = None
+    document.processing_time_ms = None
     await enqueue_document(
         db, document_id, tenant_id=document.tenant_id, max_attempts=settings.worker_max_attempts
     )
     await db.commit()
     return DocumentUploadResponse(document_id=document_id, status=DocumentStatus.PENDING)
+
+
+@router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    storage: ObjectStorage = Depends(deps.get_storage),
+    tenant_id: str = Depends(get_tenant_id),
+):
+    """Delete a document, its processing history, audit trail, and source file."""
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    active_job = await db.scalar(
+        select(DocumentJob).where(
+            DocumentJob.document_id == document_id,
+            DocumentJob.tenant_id == tenant_id,
+            DocumentJob.status.in_(["queued", "retrying", "processing"]),
+        )
+    )
+    if active_job:
+        raise HTTPException(
+            status_code=409,
+            detail="Document is still processing. Delete it after processing finishes.",
+        )
+
+    if document.file_path:
+        try:
+            await storage.delete(document.file_path)
+        except Exception as exc:
+            logger.exception("document_storage_delete_failed", document_id=document_id)
+            raise HTTPException(
+                status_code=502, detail="The source file could not be deleted"
+            ) from exc
+
+    await db.execute(
+        delete(AuditEntryModel).where(
+            AuditEntryModel.document_id == document_id,
+            AuditEntryModel.tenant_id == tenant_id,
+        )
+    )
+    await db.execute(
+        delete(DocumentEvent).where(
+            DocumentEvent.document_id == document_id,
+            DocumentEvent.tenant_id == tenant_id,
+        )
+    )
+    await db.execute(
+        delete(DocumentJob).where(
+            DocumentJob.document_id == document_id,
+            DocumentJob.tenant_id == tenant_id,
+        )
+    )
+    await db.delete(document)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{document_id}/export")
+async def export_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    tenant_id: str = Depends(get_tenant_id),
+):
+    """Download the verified extraction as a portable CSV file."""
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not document.extraction_result:
+        raise HTTPException(status_code=409, detail="Document has no completed extraction")
+
+    extraction = InvoiceExtraction.model_validate(document.extraction_result)
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "filename",
+            "invoice_number",
+            "invoice_date",
+            "vendor",
+            "vendor_address",
+            "buyer",
+            "description",
+            "quantity",
+            "unit_price",
+            "discount",
+            "line_total",
+            "subtotal",
+            "tax_total",
+            "grand_total",
+            "currency",
+            "confidence",
+        ]
+    )
+    rows = extraction.line_items or [None]
+    for item in rows:
+        writer.writerow(
+            [
+                document.filename,
+                extraction.invoice_number.value or "",
+                extraction.invoice_date or "",
+                extraction.vendor.name.value or "",
+                extraction.vendor.address.value if extraction.vendor.address else "",
+                extraction.buyer.name.value if extraction.buyer and extraction.buyer.name else "",
+                item.description if item else "",
+                item.quantity if item else "",
+                item.unit_price if item else "",
+                item.discount if item else "",
+                item.line_total if item else "",
+                extraction.subtotal if extraction.subtotal is not None else "",
+                extraction.tax_total,
+                extraction.grand_total if extraction.grand_total is not None else "",
+                extraction.currency,
+                item.confidence if item else extraction.overall_confidence,
+            ]
+        )
+
+    safe_name = Path(document.filename).stem.replace('"', "") or "invoice"
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}-export.csv"'},
+    )
 
 
 @router.get("/file/{storage_key}")

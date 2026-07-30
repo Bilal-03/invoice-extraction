@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import { Check, ChevronRight, FileUp, Loader2, RefreshCw, Sparkles } from "lucide-react";
-import { API_BASE_URL, apiClient, BoundingBox, DocumentResponse, FieldValue, InvoiceExtraction, resolveFileUrl } from "@/lib/api-client";
+import { Check, ChevronRight, Download, FileUp, Loader2, RefreshCw, Sparkles, Trash2 } from "lucide-react";
+import { API_BASE_URL, apiClient, BatchUploadResponse, BoundingBox, DocumentResponse, DocumentUploadResponse, FieldValue, InvoiceExtraction, resolveFileUrl } from "@/lib/api-client";
 
 type View = "inbox" | "review" | "insights";
 type FieldSpec = { label: string; path: string; field?: FieldValue | null; value?: string | null; conflict?: boolean; boundingBox?: BoundingBox | null };
@@ -56,6 +56,16 @@ export function Dashboard() {
     } catch (error) { console.error("Unable to load documents", error); }
   }, [fetchDocuments]);
 
+  const deleteDocument = useCallback(async (document: DocumentResponse) => {
+    if (!window.confirm(`Delete ${document.filename}? This removes its extraction and source file.`)) return;
+    try {
+      await apiClient.delete(`/documents/${document.id}`);
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      setCurrentDoc((current) => current?.id === document.id ? null : current);
+      setView((current) => current === "review" && currentDoc?.id === document.id ? "inbox" : current);
+    } catch (error) { console.error("Unable to delete document", error); }
+  }, [currentDoc?.id]);
+
   useEffect(() => {
     let active = true;
     void fetchDocuments().then((nextDocuments) => {
@@ -101,8 +111,19 @@ export function Dashboard() {
     files.forEach((file) => form.append(files.length > 1 ? "files" : "file", file));
     try {
       const endpoint = files.length > 1 ? "/documents/batch" : "/documents";
-      const response = await apiClient.post(endpoint, form, { headers: { "Content-Type": "multipart/form-data" } });
-      const first = files.length > 1 ? response.data.documents[0] : response.data;
+      const response = files.length > 1
+        ? await apiClient.post<BatchUploadResponse>(endpoint, form, { headers: { "Content-Type": "multipart/form-data" } })
+        : await apiClient.post<DocumentUploadResponse>(endpoint, form, { headers: { "Content-Type": "multipart/form-data" } });
+      const first = "documents" in response.data ? response.data.documents[0] : response.data;
+      if (first.duplicate_of) {
+        setUploadMessage("Existing document found. Re-verifying it with the latest pipeline…");
+        try {
+          await apiClient.post(`/documents/${first.document_id}/reprocess`);
+        } catch (error) {
+          const status = (error as { response?: { status?: number } }).response?.status;
+          if (status !== 409) throw error;
+        }
+      }
       const doc = await apiClient.get<DocumentResponse>(`/documents/${first.document_id}`);
       setCurrentDoc(doc.data); setUploadMessage(`${files.length} document${files.length > 1 ? "s" : ""} added to the ledger.`); setView("review"); await loadDocuments();
     } catch { setUploadMessage("Upload could not be completed. Please try again."); }
@@ -120,14 +141,14 @@ export function Dashboard() {
       <span className="environment-chip"><i /> Gemini verification on</span>
     </header>
     <main className="ledger-main">
-      {view === "inbox" && <Inbox {...dropzone} documents={documents} isUploading={isUploading} message={uploadMessage} onSelect={(doc) => { setCurrentDoc(doc); setView("review"); }} onRefresh={loadDocuments} />}
+      {view === "inbox" && <Inbox {...dropzone} documents={documents} isUploading={isUploading} message={uploadMessage} onSelect={(doc) => { setCurrentDoc(doc); setView("review"); }} onRefresh={loadDocuments} onDelete={deleteDocument} />}
       {view === "review" && <Review doc={currentDoc} onUpdated={setCurrentDoc} />}
       {view === "insights" && <Insights documents={documents} />}
     </main>
   </div>;
 }
 
-function Inbox({ getRootProps, getInputProps, isDragActive, documents, isUploading, message, onSelect, onRefresh }: ReturnType<typeof useDropzone> & { documents: DocumentResponse[]; isUploading: boolean; message: string; onSelect: (doc: DocumentResponse) => void; onRefresh: () => void }) {
+function Inbox({ getRootProps, getInputProps, isDragActive, documents, isUploading, message, onSelect, onRefresh, onDelete }: ReturnType<typeof useDropzone> & { documents: DocumentResponse[]; isUploading: boolean; message: string; onSelect: (doc: DocumentResponse) => void; onRefresh: () => void; onDelete: (doc: DocumentResponse) => void }) {
   return <section className="view-enter">
     <span className="eyebrow">New extraction</span><h1>Drop in a batch, get a verified ledger back</h1>
     <p className="subtext">Every document is read with layout-aware OCR and Gemini vision, then the evidence stays attached to each extracted field.</p>
@@ -139,7 +160,7 @@ function Inbox({ getRootProps, getInputProps, isDragActive, documents, isUploadi
     <div className="document-ledger">
       {documents.length === 0 ? <p className="empty-ledger">Your uploaded invoices will appear here with their confidence and review state.</p> : documents.map((doc) => {
         const [tone, label] = statusMeta(doc.status); const extraction = doc.extraction; const score = Math.round((extraction?.overall_confidence ?? 0) * 100);
-        return <button className="document-row" key={doc.id} onClick={() => onSelect(doc)}><div><strong>{doc.filename}</strong><small>{doc.created_at ? new Date(doc.created_at).toLocaleString() : "Just now"}</small></div><div>{extraction?.vendor?.name?.value || "Vendor not detected"}<small>{extraction?.invoice_number?.value || "No invoice number"}</small></div><div className="amount">{extraction?.grand_total != null ? `${extraction.currency || "₹"} ${Number(extraction.grand_total).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : "—"}</div><span className={`status-chip ${tone}`}>{label}</span><Ring value={score} /><ChevronRight className="row-chevron" size={17} /></button>;
+        return <div className="document-row" key={doc.id} role="button" tabIndex={0} onClick={() => onSelect(doc)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelect(doc); }}><div><strong>{doc.filename}</strong><small>{doc.created_at ? new Date(doc.created_at).toLocaleString() : "Just now"}</small></div><div>{extraction?.vendor?.name?.value || "Vendor not detected"}<small>{extraction?.invoice_number?.value || "No invoice number"}</small></div><div className="amount">{extraction?.grand_total != null ? `${extraction.currency || "₹"} ${Number(extraction.grand_total).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : "—"}</div><span className={`status-chip ${tone}`}>{label}</span><Ring value={score} /><button className="delete-document" aria-label={`Delete ${doc.filename}`} onClick={(event) => { event.stopPropagation(); onDelete(doc); }}><Trash2 size={15} /></button><ChevronRight className="row-chevron" size={17} /></div>;
       })}
     </div>
   </section>;
@@ -147,17 +168,38 @@ function Inbox({ getRootProps, getInputProps, isDragActive, documents, isUploadi
 
 function Review({ doc, onUpdated }: { doc: DocumentResponse | null; onUpdated: (doc: DocumentResponse) => void }) {
   const [activePath, setActivePath] = useState(""); const [conflictOpen, setConflictOpen] = useState(false); const previewUrl = doc?.preview_url ? resolveFileUrl(doc.preview_url) : "";
+  const [actionState, setActionState] = useState<"idle" | "working" | "error">("idle");
+  const [actionMessage, setActionMessage] = useState("");
   if (!doc) return <section className="empty-review"><span className="eyebrow">Review</span><h1>Select an invoice from the inbox</h1><p className="subtext">Its source document, field-level confidence, and audit signals will appear here.</p></section>;
   if (!doc.extraction || processingStates.includes(doc.status)) return <section className="empty-review"><Loader2 className="spin" /><h1>Building a traceable extraction</h1><p className="subtext">We&apos;ll show field evidence as soon as the document finishes processing.</p></section>;
   if (doc.status === "failed") return <section className="empty-review"><h1>Extraction needs attention</h1><p className="subtext">{doc.error_message || "The document could not be processed."}</p></section>;
   const x = doc.extraction; const score = Math.round(x.overall_confidence * 100); const needsReview = x.validation_flags.filter((flag) => !flag.passed).length;
+  const reverify = async () => {
+    setActionState("working"); setActionMessage("");
+    try {
+      await apiClient.post(`/documents/${doc.id}/reprocess`);
+      const refreshed = await apiClient.get<DocumentResponse>(`/documents/${doc.id}`);
+      onUpdated(refreshed.data);
+    } catch (error) { console.error("Could not re-verify document", error); setActionState("error"); setActionMessage("Re-verification could not be queued."); }
+    finally { setActionState((current) => current === "error" ? current : "idle"); }
+  };
+  const exportDocument = async () => {
+    setActionState("working"); setActionMessage("");
+    try {
+      const response = await apiClient.get<Blob>(`/documents/${doc.id}/export`, { responseType: "blob" });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = `${doc.filename.replace(/\.[^.]+$/, "")}-export.csv`; anchor.click(); anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) { console.error("Could not export document", error); setActionState("error"); setActionMessage("Export could not be downloaded."); }
+    finally { setActionState((current) => current === "error" ? current : "idle"); }
+  };
   const fields: FieldSpec[] = [
     { label: "Invoice number", path: "invoice_number.value", field: x.invoice_number, boundingBox: x.field_locations.invoice_number }, { label: "Invoice date", path: "invoice_date", value: x.invoice_date, boundingBox: x.field_locations.invoice_date }, { label: "PO reference", path: "po_reference.value", field: x.po_reference, boundingBox: x.field_locations.po_reference },
     { label: "Vendor name", path: "vendor.name.value", field: x.vendor.name, boundingBox: x.field_locations.vendor_name }, { label: "Vendor address", path: "vendor.address.value", field: x.vendor.address, boundingBox: x.field_locations.vendor_address, conflict: Boolean(x.validation_flags.some((flag) => !flag.passed && /address/i.test(flag.message))) },
     { label: "Billed to", path: "buyer.name.value", field: x.buyer?.name, boundingBox: x.field_locations.buyer_name }, { label: "Shipping address", path: "buyer.shipping_address.value", field: x.buyer?.shipping_address, boundingBox: x.field_locations.buyer_shipping_address },
   ];
   const save = async (path: string, oldValue: string | null, newValue: string) => { try { const result = await apiClient.patch<DocumentResponse>(`/documents/${doc.id}/fields`, { field_path: path, old_value: oldValue, new_value: newValue, corrected_by: "human_user" }); onUpdated(result.data); } catch (error) { console.error("Could not save field", error); } };
-  return <section className="review-view view-enter"><div className="review-header"><div><span className="eyebrow">{doc.filename} · page 1 of {doc.page_count}</span><h1>{x.vendor.name.value || "Invoice review"} — {x.invoice_number.value || "Unnumbered"}</h1></div><div className="review-confidence"><Ring value={score} size={48} /><span><b>{score}% overall</b><br />confidence {needsReview ? `— ${needsReview} signals need a look` : "— ready to approve"}</span></div><button className="outline-action"><Sparkles size={15} /> Re-verify</button><button className="approve-action"><Check size={15} /> Approve & export</button></div>
+  return <section className="review-view view-enter"><div className="review-header"><div><span className="eyebrow">{doc.filename} · page 1 of {doc.page_count}</span><h1>{x.vendor.name.value || "Invoice review"} — {x.invoice_number.value || "Unnumbered"}</h1></div><div className="review-confidence"><Ring value={score} size={48} /><span><b>{score}% overall</b><br />confidence {needsReview ? `— ${needsReview} signals need a look` : "— ready to approve"}</span></div><button className="outline-action" onClick={reverify} disabled={actionState === "working"}><Sparkles size={15} /> {actionState === "working" ? "Working…" : "Re-verify"}</button><button className="approve-action" onClick={exportDocument} disabled={actionState === "working"}><Download size={15} /> Approve & export</button></div>{actionMessage && <p className="action-message">{actionMessage}</p>}
     <div className="trust-note"><Sparkles size={17} /><span><b>Why these numbers can be trusted:</b> every field shows where it came from and how certain the engine was. Hover any row to see its region on the source document.</span></div>
     <div className="review-grid"><DocumentSource previewUrl={previewUrl} fields={fields} activePath={activePath} /><div className="field-ledger"><FieldSection title="Document" fields={fields.slice(0, 3)} activePath={activePath} setActivePath={setActivePath} onSave={save} /><FieldSection title="Vendor" fields={fields.slice(3, 5)} activePath={activePath} setActivePath={setActivePath} onSave={save} onConflict={() => setConflictOpen(!conflictOpen)} />{conflictOpen && <ConflictResolution current={x.vendor.address?.value || ""} onPick={(value) => { save("vendor.address.value", x.vendor.address?.value || null, value); setConflictOpen(false); }} />}<FieldSection title="Buyer" fields={fields.slice(5)} activePath={activePath} setActivePath={setActivePath} onSave={save} /><LineItems extraction={x} /><Validation flags={x.validation_flags} /></div></div>
   </section>;

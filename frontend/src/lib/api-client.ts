@@ -120,6 +120,19 @@ export interface DocumentResponse {
   preview_url?: string | null;
 }
 
+export interface DocumentUploadResponse {
+  document_id: string;
+  status: DocumentStatus;
+  message: string;
+  duplicate_of?: string | null;
+}
+
+export interface BatchUploadResponse {
+  documents: DocumentUploadResponse[];
+  accepted: number;
+  rejected: number;
+}
+
 export interface AuditEntry {
   id: string;
   document_id: string;
