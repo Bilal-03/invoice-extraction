@@ -39,5 +39,5 @@ def test_noisy_scanned_table_keeps_wrapped_product_description() -> None:
     assert "Nokia 2" in items[0].description
     assert items[0].quantity == Decimal("1")
     assert items[0].unit_price == Decimal("5517.86")
-    assert items[0].line_total == Decimal("6180.00")
+    assert items[0].line_total == Decimal("5517.86")
     assert items[1].description.lower().startswith("shipping charges")

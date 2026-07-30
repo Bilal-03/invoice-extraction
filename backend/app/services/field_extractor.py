@@ -788,7 +788,12 @@ class FieldExtractor:
                 quantity_match = re.search(r"\b(\d+(?:\.\d+)?)\b", line[matches[0].end() :])
             quantity = Decimal(quantity_match.group(1)) if quantity_match else Decimal("1")
             unit_price = amounts[0]
+            expected_net = quantity * unit_price
             net_amount = amounts[-1]
+            for amount in amounts[1:]:
+                if abs(amount - expected_net) <= max(abs(expected_net) * Decimal("0.05"), 1):
+                    net_amount = amount
+                    break
             discount = max(Decimal("0"), quantity * unit_price - net_amount)
             expected = quantity * unit_price - discount
             confidence = (
