@@ -270,7 +270,17 @@ class ExtractionService:
                 scalar in {"discount_total", "tax_total", "shipping_amount"} and not current_value
             ):
                 setattr(merged, scalar, getattr(fallback, scalar))
-        if not merged.line_items and fallback.line_items:
+        primary_item_confidence = max((item.confidence for item in merged.line_items), default=0.0)
+        fallback_item_confidence = max(
+            (item.confidence for item in fallback.line_items), default=0.0
+        )
+        weakest_primary_item = min((item.confidence for item in merged.line_items), default=1.0)
+        if fallback.line_items and (
+            not merged.line_items
+            or len(fallback.line_items) > len(merged.line_items)
+            or fallback_item_confidence > primary_item_confidence
+            or weakest_primary_item < 0.7
+        ):
             merged.line_items = fallback.line_items
         if not merged.taxes and fallback.taxes:
             merged.taxes = fallback.taxes

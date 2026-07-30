@@ -98,7 +98,15 @@ Return ONLY valid JSON with this exact structure:
 For every non-null scalar field, include an approximate normalized bounding box
 in field_locations when you can locate it. Coordinates are fractions of the
 page from top-left; use page 0 for the first page. Never invent a box for a
-field that is not present."""
+field that is not present.
+
+Line-item rules: inspect the invoice's table visually, not just the OCR text.
+Return one object for every visible product or service row, including rows
+whose description wraps across multiple lines and rows such as shipping
+charges. Map the table columns to description, quantity, unit_price, discount,
+and line_total. Use numeric values from the image, remove currency symbols and
+thousands separators, and return [] only when there is genuinely no item table.
+Do not omit a row because OCR merged its columns or misread a character."""
 
 
 class GeminiVLMClient(VLMClient):

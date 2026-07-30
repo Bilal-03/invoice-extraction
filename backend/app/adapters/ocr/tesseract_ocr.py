@@ -85,7 +85,16 @@ class TesseractOCR(OCREngine):
             )
 
         # image_to_data already invokes Tesseract. Avoid a second full OCR pass.
-        raw_text = " ".join(word.text for word in words)
+        # Keep the visual line boundaries: table extraction needs to distinguish
+        # a wrapped description from the following quantity/amount row.
+        ordered_words = sorted(words, key=lambda word: (word.y, word.x))
+        text_lines: list[list[OCRWord]] = []
+        for word in ordered_words:
+            if not text_lines or abs(word.y - text_lines[-1][0].y) > 10:
+                text_lines.append([word])
+            else:
+                text_lines[-1].append(word)
+        raw_text = "\n".join(" ".join(word.text for word in line) for line in text_lines)
 
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 

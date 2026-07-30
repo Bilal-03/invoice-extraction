@@ -692,51 +692,123 @@ class FieldExtractor:
         that look like qty × price = total patterns.
         """
         items: list[LineItem] = []
-        text_lines = text.split("\n")
+        # Tesseract supplies reliable word coordinates but its raw text is
+        # often a single whitespace-delimited stream. Reconstruct visual lines
+        # before applying table heuristics so wrapped descriptions survive OCR.
+        text_lines = (
+            [" ".join(word.text for word in line) for line in lines] if lines else text.splitlines()
+        )
+        if not text_lines:
+            text_lines = [text]
 
         # Digital-PDF and high-quality OCR table reconstruction. Descriptions
         # may span several lines; the numeric line is recognized independently.
         money_pattern = re.compile(r"[₹$€£]?\s*([\d,]+\.\d{2})")
         row_start_pattern = re.compile(r"^\s*(?:\d{1,3}\s+\|?|\|)\s*([A-Za-z].{3,})$")
-        description_parts: list[str] = []
+        pending_description: list[str] = []
+        table_started = False
+        header_pattern = re.compile(
+            r"(?i)(?:(?:description|items?).*(?:qty|quantity|unit\s*price|price|amount)|(?:qty|quantity).*(?:price|amount))"
+        )
+        date_or_header_pattern = re.compile(
+            r"(?i)(?:invoice\s+date|invoice\s+details|sl\.?\s*no\.?\s+description)"
+        )
+        has_table_header = any(header_pattern.search(line) for line in text_lines)
+
+        def clean_description(value: str) -> str:
+            value = re.sub(r"^[\[\]|:;\s]+", "", value)
+            value = re.sub(r"\s*[|]+\s*", " ", value)
+            value = re.sub(r"\s+", " ", value)
+            return value.strip()
+
+        def looks_like_description(value: str) -> bool:
+            value = clean_description(value)
+            if not re.search(r"[A-Za-z]{3}", value):
+                return False
+            if re.match(r"(?i)^[A-Za-z]{1,8}\d+[\]})]*$", value):
+                return False
+            alpha_words = re.findall(r"[A-Za-z]{3,}", value)
+            if len(alpha_words) >= 2 or value.lower().startswith(
+                ("shipping", "handling", "freight", "delivery", "service")
+            ):
+                return True
+            return bool(
+                re.match(r"(?i)^[A-Za-z]{3,}\s+\d+(?:\.\d+)?\s*(?:kg|pcs?|units?)?\b", value)
+            )
+
         for raw_line in text_lines:
             line = re.sub(r"\s+", " ", raw_line).strip()
-            if re.match(r"(?i)^TOTAL\s*:", line):
-                description_parts = []
+            if not line:
+                continue
+            if header_pattern.search(line):
+                table_started = True
+                pending_description = []
+                continue
+            if not table_started and not has_table_header and date_or_header_pattern.search(line):
+                table_started = True
+                pending_description = []
+                continue
+            summary_line = re.sub(r"^[^A-Za-z]+", "", line)
+            if table_started and re.match(r"(?i)^(?:TOTAL|SUB\s*TOTAL)\s*:?", summary_line):
+                pending_description = []
                 break
-            row_start = row_start_pattern.match(line)
+            if not table_started:
+                continue
+
+            matches = list(money_pattern.finditer(line))
+            amounts = [Decimal(str(self._parse_number(match.group(1)))) for match in matches]
+            if len(amounts) < 2:
+                if re.search(r"[A-Za-z]{3}", line) and not re.match(
+                    r"(?i)^(sold by|billing address|shipping address|invoice date|"
+                    r"invoice details|order date|pan no|gst|amount in words|for |"
+                    r"billto|ship to)",
+                    line,
+                ):
+                    row_start = row_start_pattern.match(line)
+                    candidate = row_start.group(1) if row_start else line
+                    if candidate:
+                        pending_description.append(clean_description(candidate))
+                continue
+
+            prefix = line[: matches[0].start()].strip()
+            row_start = row_start_pattern.match(prefix)
             if row_start:
-                description_parts = [row_start.group(1).strip()]
+                prefix = row_start.group(1)
+            candidate = clean_description(prefix) if looks_like_description(prefix) else ""
+            if not candidate:
+                candidate = clean_description(" ".join(pending_description))
+            if not candidate or not re.search(r"[A-Za-z]{3}", candidate):
+                pending_description = []
                 continue
-            amounts = [
-                Decimal(str(self._parse_number(match.group(1))))
-                for match in money_pattern.finditer(line)
-            ]
-            if description_parts and len(amounts) >= 2:
-                first_amount = next(money_pattern.finditer(line))
-                quantity_match = re.search(r"\b(\d+(?:\.\d+)?)\b", line[first_amount.end() :])
-                quantity = Decimal(quantity_match.group(1)) if quantity_match else Decimal("1")
-                unit_price = amounts[0]
-                net_amount = amounts[1]
-                discount = max(Decimal("0"), quantity * unit_price - net_amount)
-                items.append(
-                    LineItem(
-                        description=" ".join(description_parts),
-                        quantity=quantity,
-                        unit_price=unit_price,
-                        discount=discount,
-                        line_total=net_amount,
-                        confidence=0.93,
-                    )
+
+            # Quantity can appear before the first amount (e.g. `5 KG`) or
+            # between amount columns, depending on the invoice template.
+            quantity_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:kg|pcs?|units?)?\b", prefix, re.I)
+            if not quantity_match:
+                quantity_match = re.search(r"\b(\d+(?:\.\d+)?)\b", line[matches[0].end() :])
+            quantity = Decimal(quantity_match.group(1)) if quantity_match else Decimal("1")
+            unit_price = amounts[0]
+            net_amount = amounts[-1]
+            discount = max(Decimal("0"), quantity * unit_price - net_amount)
+            expected = quantity * unit_price - discount
+            confidence = (
+                0.93
+                if unit_price > 0
+                and net_amount >= 0
+                and abs(expected - net_amount) <= max(abs(expected) * Decimal("0.05"), 1)
+                else 0.35
+            )
+            items.append(
+                LineItem(
+                    description=candidate,
+                    quantity=quantity,
+                    unit_price=unit_price,
+                    discount=discount,
+                    line_total=net_amount,
+                    confidence=confidence,
                 )
-                description_parts = []
-                continue
-            if (
-                description_parts
-                and line
-                and not re.match(r"(?i)^(sl\.?|description|unit price|qty|net amount|tax)", line)
-            ):
-                description_parts.append(line)
+            )
+            pending_description = []
 
         if items:
             return items
