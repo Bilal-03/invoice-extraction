@@ -1,5 +1,4 @@
 import { Dashboard } from "@/components/Dashboard";
-import { AuthControls } from "@/components/AuthControls";
 import { FileCheck2, Gauge, ShieldCheck } from "lucide-react";
 
 export default function Home() {
@@ -23,7 +22,6 @@ export default function Home() {
               <span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-4 w-4 text-violet-300" /> Auditable corrections</span>
             </div>
           </div>
-          <AuthControls />
         </div>
       </header>
 
