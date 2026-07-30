@@ -63,7 +63,13 @@ export function Dashboard() {
       setDocuments((current) => current.filter((item) => item.id !== document.id));
       setCurrentDoc((current) => current?.id === document.id ? null : current);
       setView((current) => current === "review" && currentDoc?.id === document.id ? "inbox" : current);
-    } catch (error) { console.error("Unable to delete document", error); }
+    } catch (error) {
+      console.error("Unable to delete document", error);
+      const status = (error as { response?: { status?: number } }).response?.status;
+      setUploadMessage(status === 409
+        ? "This document is still processing. Delete it after processing finishes."
+        : "Document could not be deleted. Please try again.");
+    }
   }, [currentDoc?.id]);
 
   useEffect(() => {
