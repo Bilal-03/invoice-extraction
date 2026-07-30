@@ -43,15 +43,28 @@ export function Dashboard() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
 
-  const loadDocuments = useCallback(async () => {
-    try {
-      const response = await apiClient.get<{ documents: DocumentResponse[] }>("/documents");
-      setDocuments(response.data.documents);
-      setCurrentDoc((selected) => selected ? response.data.documents.find((doc) => doc.id === selected.id) ?? selected : response.data.documents[0] ?? null);
-    } catch (error) { console.error("Unable to load documents", error); }
+  const fetchDocuments = useCallback(async () => {
+    const response = await apiClient.get<{ documents: DocumentResponse[] }>("/documents");
+    return response.data.documents;
   }, []);
 
-  useEffect(() => { loadDocuments(); }, [loadDocuments]);
+  const loadDocuments = useCallback(async () => {
+    try {
+      const nextDocuments = await fetchDocuments();
+      setDocuments(nextDocuments);
+      setCurrentDoc((selected) => selected ? nextDocuments.find((doc) => doc.id === selected.id) ?? selected : nextDocuments[0] ?? null);
+    } catch (error) { console.error("Unable to load documents", error); }
+  }, [fetchDocuments]);
+
+  useEffect(() => {
+    let active = true;
+    void fetchDocuments().then((nextDocuments) => {
+      if (!active) return;
+      setDocuments(nextDocuments);
+      setCurrentDoc((selected) => selected ? nextDocuments.find((doc) => doc.id === selected.id) ?? selected : nextDocuments[0] ?? null);
+    }).catch((error) => console.error("Unable to load documents", error));
+    return () => { active = false; };
+  }, [fetchDocuments]);
   useEffect(() => {
     if (!currentDoc || !processingStates.includes(currentDoc.status)) return;
     const controller = new AbortController();
