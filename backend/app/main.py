@@ -2,7 +2,8 @@
 FastAPI application entry point.
 """
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +42,22 @@ async def lifespan(app: FastAPI):
         logger.error("database_initialization_failed", error=str(e))
         raise
 
-    yield
+    worker_task: asyncio.Task[None] | None = None
+    if settings.embedded_worker_enabled:
+        # For a single free Render web service, this avoids requiring a second
+        # always-running worker. Jobs remain durable in Postgres across restarts.
+        from app.worker import run_worker
+
+        worker_task = asyncio.create_task(run_worker(), name="embedded-document-worker")
+        logger.info("embedded_worker_started")
+
+    try:
+        yield
+    finally:
+        if worker_task:
+            worker_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker_task
 
     # Shutdown
     logger.info("application_shutdown")

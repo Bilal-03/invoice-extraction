@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     pdf_render_dpi: int = 160
     worker_poll_interval_seconds: float = 2.0
     worker_max_attempts: int = 3
+    embedded_worker_enabled: bool = False
 
     # ── VLM Fallback ─────────────────────────────────────────────────
     vlm_enabled: bool = False

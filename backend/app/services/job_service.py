@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities import DocumentEvent, DocumentJob
@@ -43,6 +43,17 @@ async def enqueue_document(
 
 async def claim_next_job(session: AsyncSession, worker_id: str) -> DocumentJob | None:
     now = datetime.now(UTC)
+    # A Render restart can interrupt OCR halfway through. Release abandoned
+    # leases so the embedded worker resumes work after the next service wakeup.
+    await session.execute(
+        update(DocumentJob)
+        .where(
+            DocumentJob.status == "processing",
+            DocumentJob.locked_at.is_not(None),
+            DocumentJob.locked_at < now - timedelta(minutes=15),
+        )
+        .values(status="retrying", locked_at=None, locked_by=None, available_at=now)
+    )
     statement = (
         select(DocumentJob)
         .where(DocumentJob.status.in_(["queued", "retrying"]), DocumentJob.available_at <= now)

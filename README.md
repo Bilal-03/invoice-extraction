@@ -76,6 +76,11 @@ after adding the server-only key from the Supabase dashboard. Never add that key
 frontend environment file. Jobs remain queued safely in Postgres whenever the worker is
 not running. See `docs/production-readiness.md` for operations and retention guidance.
 
+For a single free Render web service, set `EMBEDDED_WORKER_ENABLED=true` in Render.
+The web service then consumes queued OCR jobs itself after an upload wakes it; no laptop
+terminal is needed. Render can still spin down after inactivity, so queued jobs resume on
+the next request rather than being processed continuously.
+
 The SQLite database and local upload directory are created automatically at startup.
 Data is stored in `backend/data/invoices.db` and `backend/data/uploads`.
 
