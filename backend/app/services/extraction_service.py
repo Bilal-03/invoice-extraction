@@ -51,6 +51,28 @@ class ExtractionService:
         """Run the full extraction pipeline on an image."""
         return await self.extract_from_images([image])
 
+    async def extract_from_ocr_result(
+        self,
+        ocr_result: OCRResult,
+        status_callback: Callable[[DocumentStatus], Awaitable[None]] | None = None,
+    ) -> InvoiceExtraction:
+        """Extract from a trusted native text layer without raster OCR."""
+        start_time = time.time()
+        if status_callback:
+            await status_callback(DocumentStatus.EXTRACTING)
+        extraction = self.layout_extractor.extract(ocr_result)
+        if status_callback:
+            await status_callback(DocumentStatus.VALIDATING)
+        extraction.validation_flags = self.validator.validate(extraction)
+        extraction.overall_confidence = self._composite_confidence(
+            extraction, ocr_result.average_confidence
+        )
+        extraction.processing_time_ms = int((time.time() - start_time) * 1000)
+        logger.info(
+            "pipeline_complete_native_pdf", processing_time_ms=extraction.processing_time_ms
+        )
+        return extraction
+
     async def extract_from_images(
         self,
         images: list[np.ndarray],

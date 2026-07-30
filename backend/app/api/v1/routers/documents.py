@@ -14,7 +14,6 @@ from pathlib import Path
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     HTTPException,
@@ -35,7 +34,7 @@ from app.core.database import async_session_factory, get_db_session
 from app.core.logging import get_logger
 from app.core.security import verify_auth
 from app.core.uploads import validate_upload
-from app.domain.entities import AuditEntryModel, Document
+from app.domain.entities import AuditEntryModel, Document, DocumentEvent, DocumentJob
 from app.domain.schemas import (
     AuditEntry,
     BatchUploadResponse,
@@ -46,8 +45,8 @@ from app.domain.schemas import (
     FieldCorrectionRequest,
     InvoiceExtraction,
 )
+from app.services.job_service import enqueue_document
 from app.services.validation_service import ValidationService
-from app.tasks.pipeline_tasks import dispatch_extraction_pipeline
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(verify_auth)])
@@ -129,7 +128,6 @@ async def _accept_upload(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def upload_document(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
@@ -145,15 +143,13 @@ async def upload_document(
     response, doc = await _accept_upload(file, db, storage, settings)
     if doc:
         logger.info("document_uploaded", document_id=doc.id, filename=doc.filename)
-        await dispatch_extraction_pipeline(
-            background_tasks, doc.id, storage, ocr_engine, vlm_client
-        )
+        await enqueue_document(db, doc.id, max_attempts=settings.worker_max_attempts)
+        await db.commit()
     return response
 
 
 @router.post("/batch", response_model=BatchUploadResponse, status_code=202)
 async def upload_document_batch(
-    background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(...),
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
@@ -168,9 +164,8 @@ async def upload_document_batch(
         response, doc = await _accept_upload(file, db, storage, settings)
         responses.append(response)
         if doc:
-            await dispatch_extraction_pipeline(
-                background_tasks, doc.id, storage, ocr_engine, vlm_client
-            )
+            await enqueue_document(db, doc.id, max_attempts=settings.worker_max_attempts)
+    await db.commit()
     return BatchUploadResponse(documents=responses, accepted=len(responses))
 
 
@@ -186,15 +181,16 @@ async def get_document_preview(
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     file_bytes = await storage.download(document.file_path)
-    from app.adapters.preprocessing.pipeline import load_image_from_bytes, load_pdf_pages
+    from app.adapters.preprocessing.pipeline import load_image_from_bytes, load_pdf_page
 
     is_pdf = file_bytes.startswith(b"%PDF") or document.file_path.lower().endswith(".pdf")
-    images = load_pdf_pages(file_bytes) if is_pdf else [load_image_from_bytes(file_bytes)]
-    if page > len(images):
-        raise HTTPException(status_code=404, detail="Preview page not found")
+    try:
+        image = load_pdf_page(file_bytes, page - 1) if is_pdf else load_image_from_bytes(file_bytes)
+    except IndexError as exc:
+        raise HTTPException(status_code=404, detail="Preview page not found") from exc
     import cv2
 
-    success, encoded = cv2.imencode(".png", images[page - 1])
+    success, encoded = cv2.imencode(".png", image)
     if not success:
         raise HTTPException(status_code=422, detail="Could not render document preview")
     return Response(content=encoded.tobytes(), media_type="image/png")
@@ -378,7 +374,7 @@ async def get_document_audit_trail(
 
 @router.get("/{document_id}/events")
 async def stream_document_status(document_id: str):
-    """Server-sent event stream for live pipeline status updates."""
+    """SSE fallback; production clients should subscribe to Supabase Realtime events."""
 
     async def event_stream():
         previous = None
@@ -407,6 +403,57 @@ async def stream_document_status(document_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/{document_id}/events/history")
+async def get_document_events(
+    document_id: str,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Return the durable job timeline used by the dashboard and support tooling."""
+    rows = await db.scalars(
+        select(DocumentEvent)
+        .where(DocumentEvent.document_id == document_id)
+        .order_by(DocumentEvent.created_at)
+    )
+    return [
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "status": event.status,
+            "stage": event.stage,
+            "message": event.message,
+            "created_at": event.created_at,
+        }
+        for event in rows
+    ]
+
+
+@router.post("/{document_id}/reprocess", response_model=DocumentUploadResponse, status_code=202)
+async def reprocess_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+):
+    """Queue a new attempt without discarding the prior extraction or audit trail."""
+    document = await db.scalar(select(Document).where(Document.id == document_id))
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    active_job = await db.scalar(
+        select(DocumentJob).where(
+            DocumentJob.document_id == document_id,
+            DocumentJob.status.in_(["queued", "retrying", "processing"]),
+        )
+    )
+    if active_job:
+        raise HTTPException(status_code=409, detail="Document already has an active job")
+    document.status = DocumentStatus.PENDING.value
+    document.error_message = None
+    await enqueue_document(
+        db, document_id, tenant_id=document.tenant_id, max_attempts=settings.worker_max_attempts
+    )
+    await db.commit()
+    return DocumentUploadResponse(document_id=document_id, status=DocumentStatus.PENDING)
 
 
 @router.get("/file/{storage_key}")

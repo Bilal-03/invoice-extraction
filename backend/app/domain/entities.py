@@ -35,6 +35,7 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False, default="local", index=True)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -86,8 +87,48 @@ class AuditEntryModel(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     document_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False, default="local", index=True)
     field_path: Mapped[str] = mapped_column(String(100), nullable=False)
     old_value: Mapped[str] = mapped_column(Text, nullable=True)
     new_value: Mapped[str] = mapped_column(Text, nullable=False)
     corrected_by: Mapped[str] = mapped_column(String(100), default="user")
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+class DocumentJob(Base):
+    """Durable, database-backed work queue consumed by the local worker."""
+
+    __tablename__ = "document_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False, default="local", index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, index=True
+    )
+    locked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_by: Mapped[str] = mapped_column(String(100), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DocumentEvent(Base):
+    """Immutable processing timeline, published through Supabase Realtime."""
+
+    __tablename__ = "document_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
+    document_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False, default="local", index=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    stage: Mapped[str] = mapped_column(String(40), nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utc_now, index=True
+    )

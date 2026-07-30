@@ -21,6 +21,7 @@ from functools import partial
 import cv2
 import numpy as np
 
+from app.adapters.ocr.base import OCRResult, OCRWord
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -211,8 +212,8 @@ def load_pdf_pages(file_bytes: bytes) -> list[np.ndarray]:
 
     for page_num in range(len(doc)):
         page = doc[page_num]
-        # Render at 200 DPI for good OCR quality
-        mat = fitz.Matrix(200 / 72, 200 / 72)
+        # 160 DPI is sufficient for OCR while materially reducing raster work.
+        mat = fitz.Matrix(160 / 72, 160 / 72)
         pix = page.get_pixmap(matrix=mat)
 
         # Convert to numpy array
@@ -229,6 +230,67 @@ def load_pdf_pages(file_bytes: bytes) -> list[np.ndarray]:
     doc.close()
     logger.info("pdf_pages_loaded", page_count=len(images))
     return images
+
+
+def extract_pdf_ocr_result(file_bytes: bytes) -> OCRResult | None:
+    """Read a digital PDF's text layer with native word coordinates.
+
+    Generated invoices usually contain selectable text. Bypassing render + OCR
+    for those files is the largest latency win and preserves review overlays.
+    """
+    import fitz
+
+    document = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        words: list[OCRWord] = []
+        dimensions: dict[int, tuple[int, int]] = {}
+        texts: list[str] = []
+        for page_index, page in enumerate(document):
+            rect = page.rect
+            dimensions[page_index] = (max(1, round(rect.width)), max(1, round(rect.height)))
+            texts.append(page.get_text("text").strip())
+            for x0, y0, x1, y1, text, *_ in page.get_text("words"):
+                if text.strip():
+                    words.append(
+                        OCRWord(
+                            text=text,
+                            confidence=0.99,
+                            x=round(x0),
+                            y=round(y0),
+                            width=max(1, round(x1 - x0)),
+                            height=max(1, round(y1 - y0)),
+                            page=page_index,
+                        )
+                    )
+    finally:
+        document.close()
+
+    if len(words) < 20:
+        return None
+    logger.info("pdf_native_text_used", page_count=len(dimensions), word_count=len(words))
+    return OCRResult(
+        raw_text="\n\f\n".join(text for text in texts if text),
+        words=words,
+        average_confidence=0.99,
+        engine_name="pdf_text",
+        page_count=len(dimensions),
+        page_dimensions=dimensions,
+    )
+
+
+def load_pdf_page(file_bytes: bytes, page_number: int, dpi: int = 120) -> np.ndarray:
+    """Render only the requested PDF page for fast review previews."""
+    import fitz
+
+    document = fitz.open(stream=file_bytes, filetype="pdf")
+    try:
+        if page_number < 0 or page_number >= len(document):
+            raise IndexError("PDF page out of range")
+        pix = document[page_number].get_pixmap(matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False)
+        image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if pix.n == 3 else image
+    finally:
+        document.close()
 
 
 def extract_pdf_text(file_bytes: bytes) -> str | None:

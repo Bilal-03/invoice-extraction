@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import dynamic from "next/dynamic";
 import { useDropzone } from "react-dropzone";
 import { UploadCloud, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { apiClient, DocumentResponse } from "@/lib/api-client";
@@ -9,9 +10,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { DocumentPreview } from "./DocumentPreview";
-import { AnalyticsView } from "./AnalyticsView";
 import { DocumentList } from "./DocumentList";
+
+const DocumentPreview = dynamic(() => import("./DocumentPreview").then((mod) => mod.DocumentPreview), {
+  loading: () => <div className="h-[560px] animate-pulse rounded-2xl border border-white/10 bg-white/5" />,
+});
+const AnalyticsView = dynamic(() => import("./AnalyticsView").then((mod) => mod.AnalyticsView), {
+  loading: () => <div className="h-[560px] animate-pulse rounded-2xl border border-white/10 bg-white/5" />,
+});
 
 export function Dashboard() {
   const [activeTab, setActiveTab] = useState("upload");
@@ -108,16 +114,17 @@ export function Dashboard() {
 
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full space-y-6">
-      <TabsList className="grid w-full grid-cols-3 max-w-md bg-white/10 backdrop-blur-md border border-white/20">
-        <TabsTrigger value="upload">Upload</TabsTrigger>
-        <TabsTrigger value="preview" disabled={!currentDoc}>Extraction</TabsTrigger>
-        <TabsTrigger value="analytics">Analytics</TabsTrigger>
+      <TabsList className="grid h-12 w-full grid-cols-3 max-w-lg rounded-2xl bg-white/8 p-1 backdrop-blur-md border border-white/10">
+        <TabsTrigger value="upload" className="rounded-xl">Workspace</TabsTrigger>
+        <TabsTrigger value="preview" className="rounded-xl" disabled={!currentDoc}>Review</TabsTrigger>
+        <TabsTrigger value="analytics" className="rounded-xl">Insights</TabsTrigger>
       </TabsList>
       
       <TabsContent value="upload" className="space-y-6">
-        <Card className="border-white/20 bg-white/5 backdrop-blur-xl shadow-2xl">
-          <CardHeader>
-            <CardTitle>Process New Document</CardTitle>
+        <Card className="overflow-hidden border-white/15 bg-gradient-to-br from-slate-900/80 via-slate-950/70 to-indigo-950/60 shadow-2xl shadow-indigo-950/30 backdrop-blur-xl">
+          <CardHeader className="border-b border-white/10 pb-5">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">New extraction</p>
+            <CardTitle className="text-2xl">Turn invoices into review-ready data</CardTitle>
             <CardDescription>
               Drag and drop one or more invoice images or PDFs to start extraction.
             </CardDescription>

@@ -84,8 +84,8 @@ class TesseractOCR(OCREngine):
                 )
             )
 
-        # Build raw text from Tesseract's standard output
-        raw_text = pytesseract.image_to_string(image, config="--psm 6").strip()
+        # image_to_data already invokes Tesseract. Avoid a second full OCR pass.
+        raw_text = " ".join(word.text for word in words)
 
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 

@@ -14,9 +14,10 @@ from app.adapters.ocr.base import OCREngine
 from app.adapters.ocr.tesseract_ocr import TesseractOCR
 from app.adapters.storage.base import ObjectStorage
 from app.adapters.storage.local_storage import LocalStorage
+from app.adapters.storage.supabase_storage import SupabaseStorage
 from app.adapters.vlm.base import VLMClient
 from app.adapters.vlm.gemini_client import GeminiVLMClient
-from app.core.config import OCREngineType, Settings, get_settings
+from app.core.config import OCREngineType, Settings, StorageBackend, get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +29,14 @@ _VLM_INSTANCE: VLMClient | None = None
 
 
 def build_storage(settings: Settings) -> ObjectStorage:
+    if settings.storage_backend == StorageBackend.SUPABASE:
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
+        return SupabaseStorage(
+            settings.supabase_url,
+            settings.supabase_service_role_key,
+            settings.supabase_storage_bucket,
+        )
     return LocalStorage(base_dir=settings.upload_dir)
 
 

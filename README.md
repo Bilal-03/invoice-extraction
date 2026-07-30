@@ -56,6 +56,26 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). OpenAPI documentation is at [http://localhost:8000/docs](http://localhost:8000/docs).
 
+## Supabase without Docker
+
+The repository supports hosted Supabase Postgres and private Storage while OCR remains a
+free local Python process. Configure the Supabase connection in `backend/.env`, install
+dependencies, then run the API and a separate durable worker:
+
+```bash
+cd backend
+pip install -e ".[dev]"
+alembic upgrade head
+uvicorn app.main:app --reload
+# another terminal
+python -m app.worker
+```
+
+Set `STORAGE_BACKEND=supabase`, `SUPABASE_URL`, and `SUPABASE_SERVICE_ROLE_KEY` only
+after adding the server-only key from the Supabase dashboard. Never add that key to a
+frontend environment file. Jobs remain queued safely in Postgres whenever the worker is
+not running. See `docs/production-readiness.md` for operations and retention guidance.
+
 The SQLite database and local upload directory are created automatically at startup.
 Data is stored in `backend/data/invoices.db` and `backend/data/uploads`.
 

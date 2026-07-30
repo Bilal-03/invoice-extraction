@@ -14,6 +14,9 @@ dependencies = [
     # Database
     "sqlalchemy[asyncio]>=2.0.30",
     "aiosqlite>=0.20.0",
+    "asyncpg>=0.29.0",
+    "psycopg[binary]>=3.1.0",
+    "alembic>=1.13.0",
     # Validation & config
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",

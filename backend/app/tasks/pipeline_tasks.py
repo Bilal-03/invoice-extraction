@@ -5,19 +5,24 @@ Runs in FastAPI's built-in background task system so the application needs no
 queue server or worker process.
 """
 
+import asyncio
+
 from sqlalchemy import select
 
 from app.adapters.ocr.base import OCREngine
 from app.adapters.storage.base import ObjectStorage
 from app.adapters.vlm.base import VLMClient
+from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.logging import get_logger
 from app.core.metrics import record_document
 from app.domain.entities import Document
 from app.domain.schemas import DocumentStatus, ValidationFlag, ValidationSeverity
 from app.services.extraction_service import ExtractionService
+from app.services.job_service import add_event
 
 logger = get_logger(__name__)
+_pipeline_slots = asyncio.Semaphore(get_settings().pipeline_max_concurrency)
 
 
 async def dispatch_extraction_pipeline(
@@ -51,6 +56,17 @@ async def run_extraction_pipeline(
     3. Run ExtractionService
     4. Save results back to DB
     """
+    async with _pipeline_slots:
+        await _run_extraction_pipeline(document_id, storage, ocr_engine, vlm_client)
+
+
+async def _run_extraction_pipeline(
+    document_id: str,
+    storage: ObjectStorage,
+    ocr_engine: OCREngine,
+    vlm_client: VLMClient | None = None,
+) -> None:
+    """Process one job after acquiring a bounded local worker slot."""
     logger.info("pipeline_started", document_id=document_id)
 
     async with async_session_factory() as session:
@@ -73,7 +89,7 @@ async def run_extraction_pipeline(
 
             # Decode every page so multi-page invoices remain one logical document.
             from app.adapters.preprocessing.pipeline import (
-                extract_pdf_text,
+                extract_pdf_ocr_result,
                 load_image_from_bytes,
                 load_pdf_pages,
             )
@@ -82,15 +98,22 @@ async def run_extraction_pipeline(
             is_pdf = file_bytes[:4] == b"%PDF" or document.file_path.lower().endswith(".pdf")
 
             if is_pdf:
-                images = load_pdf_pages(file_bytes)
-                text_hint = extract_pdf_text(file_bytes)
-                if not images:
-                    raise ValueError("PDF has no pages")
+                native_ocr = extract_pdf_ocr_result(file_bytes)
+                images = []
+                text_hint = None
+                if native_ocr:
+                    document.page_count = native_ocr.page_count
+                else:
+                    images = load_pdf_pages(file_bytes)
+                    if not images:
+                        raise ValueError("PDF has no pages")
             else:
                 images = [load_image_from_bytes(file_bytes)]
                 text_hint = None
+                native_ocr = None
 
-            document.page_count = len(images)
+            if not native_ocr:
+                document.page_count = len(images)
 
             # Run extraction
             document.status = DocumentStatus.EXTRACTING.value
@@ -100,10 +123,20 @@ async def run_extraction_pipeline(
 
             async def update_status(pipeline_status: DocumentStatus) -> None:
                 document.status = pipeline_status.value
+                await add_event(
+                    session,
+                    document.id,
+                    pipeline_status.value,
+                    "stage_changed",
+                    tenant_id=document.tenant_id,
+                    stage=pipeline_status.value,
+                )
                 await session.commit()
 
-            extraction_result = await service.extract_from_images(
-                images, update_status, text_hint=text_hint
+            extraction_result = (
+                await service.extract_from_ocr_result(native_ocr, update_status)
+                if native_ocr
+                else await service.extract_from_images(images, update_status, text_hint=text_hint)
             )
 
             # Business-key duplicate detection catches re-scans whose bytes differ.
@@ -147,6 +180,14 @@ async def run_extraction_pipeline(
             document.currency = extraction_result.currency
             document.status = DocumentStatus.COMPLETED.value
 
+            await add_event(
+                session,
+                document.id,
+                DocumentStatus.COMPLETED.value,
+                "extraction_completed",
+                tenant_id=document.tenant_id,
+            )
+
             await session.commit()
             record_document(
                 "completed",
@@ -167,5 +208,13 @@ async def run_extraction_pipeline(
                 if doc:
                     doc.status = DocumentStatus.FAILED.value
                     doc.error_message = str(e)
+                    await add_event(
+                        error_session,
+                        doc.id,
+                        DocumentStatus.FAILED.value,
+                        "extraction_failed",
+                        tenant_id=doc.tenant_id,
+                        message=str(e),
+                    )
                     await error_session.commit()
             record_document("failed")

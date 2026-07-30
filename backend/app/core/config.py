@@ -6,6 +6,7 @@ This centralises settings so nothing is hardcoded across the codebase.
 """
 
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +25,11 @@ class Environment(StrEnum):
     DEVELOPMENT = "development"
     STAGING = "staging"
     PRODUCTION = "production"
+
+
+class StorageBackend(StrEnum):
+    LOCAL = "local"
+    SUPABASE = "supabase"
 
 
 # Resolve project root relative to this file
@@ -56,6 +62,11 @@ class Settings(BaseSettings):
 
     # ── File Storage ─────────────────────────────────────────────────
     upload_dir: str = str(_BACKEND_ROOT / "data" / "uploads")
+    storage_backend: StorageBackend = StorageBackend.LOCAL
+    supabase_url: str | None = None
+    supabase_service_role_key: str | None = None
+    supabase_storage_bucket: str = "documents"
+    source_retention_days: int = 30
     max_file_size_mb: int = 20
     allowed_extensions: set[str] = {".jpg", ".jpeg", ".png", ".tiff", ".tif", ".pdf"}
 
@@ -68,6 +79,10 @@ class Settings(BaseSettings):
     preprocessing_deskew: bool = True
     preprocessing_denoise: bool = True
     preprocessing_orient: bool = True
+    pipeline_max_concurrency: int = 2
+    pdf_render_dpi: int = 160
+    worker_poll_interval_seconds: float = 2.0
+    worker_max_attempts: int = 3
 
     # ── VLM Fallback ─────────────────────────────────────────────────
     vlm_enabled: bool = False
@@ -93,6 +108,7 @@ class Settings(BaseSettings):
     log_json: bool = False  # Set True in production
 
 
+@lru_cache
 def get_settings() -> Settings:
     """Factory function for dependency injection."""
     return Settings()

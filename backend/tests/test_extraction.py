@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from app.adapters.ocr.base import OCRResult, OCRWord
-from app.adapters.preprocessing.pipeline import extract_pdf_text
+from app.adapters.preprocessing.pipeline import extract_pdf_ocr_result, extract_pdf_text
 from app.services.field_extractor import FieldExtractor
 
 
@@ -155,6 +155,22 @@ def test_extract_pdf_text_prefers_embedded_digital_text():
 
     assert extracted is not None
     assert "Invoice Number INV-100" in extracted
+
+
+def test_native_pdf_ocr_result_keeps_text_and_coordinates():
+    import fitz
+
+    document = fitz.open()
+    page = document.new_page()
+    text = "Invoice Number INV-100 " + "invoice detail " * 20
+    page.insert_textbox(fitz.Rect(40, 50, 550, 300), text, fontsize=10)
+    result = extract_pdf_ocr_result(document.tobytes())
+    document.close()
+
+    assert result is not None
+    assert result.engine_name == "pdf_text"
+    assert any(word.text == "INV-100" for word in result.words)
+    assert result.page_dimensions[0][0] > 0
 
 
 def test_spatial_columns_keep_vendor_and_buyer_separate_for_scans():

@@ -11,8 +11,7 @@ class ObjectStorage(ABC):
     """
     Abstract storage interface for document files.
 
-    Current implementation: LocalStorage, backed by the application's upload
-    directory. Keeping the interface makes the API easy to test.
+    Implementations include local development storage and Supabase Storage.
     """
 
     @abstractmethod

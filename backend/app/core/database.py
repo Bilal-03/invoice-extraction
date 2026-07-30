@@ -23,7 +23,14 @@ engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
     # SQLite needs these for async compatibility
-    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
+    connect_args=(
+        {"check_same_thread": False}
+        if "sqlite" in settings.database_url
+        else {"ssl": "require"}
+        if "supabase.com" in settings.database_url
+        else {}
+    ),
+    pool_pre_ping=True,
 )
 
 async_session_factory = async_sessionmaker(
