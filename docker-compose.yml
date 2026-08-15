@@ -1,0 +1,89 @@
+services:
+  backend-image:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: invoice-intelligence-backend:local
+    platform: linux/amd64
+    command: ["true"]
+
+  migrate:
+    image: invoice-intelligence-backend:local
+    platform: linux/amd64
+    env_file:
+      - ./backend/.env
+    environment: &backend-environment
+      UPLOAD_DIR: /app/data/uploads
+      STORAGE_BACKEND: supabase
+      PIPELINE_PROFILE: local-full
+      OCR_ENGINE: pp-structure-v3
+      PADDLE_DEVICE: cpu
+      DOCUMENT_PARSER: auto
+      LAYOUT_ENGINE: pp-structure-v3
+      VLM_ENABLED: ${VLM_ENABLED:-false}
+      VLM_PROVIDER: ${VLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3-vl:2b}
+      LLAMA_CPP_BASE_URL: http://host.docker.internal:8080
+      LLAMA_CPP_MODEL: ${LLAMA_CPP_MODEL:-local-model}
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:8000"]'
+      TRACING_ENABLED: "false"
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      backend-image:
+        condition: service_completed_successfully
+
+  api:
+    image: invoice-intelligence-backend:local
+    platform: linux/amd64
+    env_file:
+      - ./backend/.env
+    environment: *backend-environment
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: invoice-intelligence-backend:local
+    platform: linux/amd64
+    env_file:
+      - ./backend/.env
+    environment: *backend-environment
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  seed:
+    image: invoice-intelligence-backend:local
+    platform: linux/amd64
+    env_file:
+      - ./backend/.env
+    environment: *backend-environment
+    command: ["python", "-m", "app.seed", "--reset"]
+    profiles: ["seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    environment:
+      VITE_API_URL: http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  frontend_node_modules:

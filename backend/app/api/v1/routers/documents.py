@@ -11,7 +11,7 @@ import csv
 import io
 import json
 import math
-from datetime import UTC, date, datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 
 from fastapi import (
@@ -31,12 +31,20 @@ from app.adapters.ocr.base import OCREngine
 from app.adapters.storage.base import ObjectStorage
 from app.adapters.vlm.base import VLMClient
 from app.api.v1 import deps
+from app.core.compat import UTC
 from app.core.config import Settings, get_settings
 from app.core.database import async_session_factory, get_db_session
 from app.core.logging import get_logger
 from app.core.security import get_tenant_id, verify_auth
 from app.core.uploads import validate_upload
-from app.domain.entities import AuditEntryModel, Document, DocumentEvent, DocumentJob
+from app.domain.entities import (
+    AuditEntryModel,
+    Document,
+    DocumentEvent,
+    DocumentJob,
+    DocumentPreprocessingArtifact,
+    OCRToken,
+)
 from app.domain.schemas import (
     AuditEntry,
     BatchUploadResponse,
@@ -46,7 +54,11 @@ from app.domain.schemas import (
     DocumentUploadResponse,
     FieldCorrectionRequest,
     InvoiceExtraction,
+    OCRTokenResponse,
+    PreprocessingArtifactResponse,
 )
+from app.services.ap_service import project_document
+from app.services.corrections import audit_value
 from app.services.job_service import enqueue_document
 from app.services.validation_service import ValidationService
 
@@ -55,6 +67,9 @@ router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depend
 
 
 async def _document_response(doc: Document, storage: ObjectStorage) -> DocumentResponse:
+    extraction = (
+        InvoiceExtraction.model_validate(doc.extraction_result) if doc.extraction_result else None
+    )
     return DocumentResponse(
         id=doc.id,
         filename=doc.filename,
@@ -65,8 +80,9 @@ async def _document_response(doc: Document, storage: ObjectStorage) -> DocumentR
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         processing_time_ms=doc.processing_time_ms,
-        extraction=InvoiceExtraction.model_validate(doc.extraction_result)
-        if doc.extraction_result
+        extraction=extraction,
+        standardized_invoice=extraction.standardized_invoice or extraction.to_standard()
+        if extraction
         else None,
         file_url=await storage.get_url(doc.file_path) if doc.file_path else None,
         preview_url=f"/api/v1/documents/{doc.id}/preview" if doc.file_path else None,
@@ -183,6 +199,7 @@ async def upload_document_batch(
 async def get_document_preview(
     document_id: str,
     page: int = Query(1, ge=1),
+    processed: bool = Query(False),
     db: AsyncSession = Depends(get_db_session),
     storage: ObjectStorage = Depends(deps.get_storage),
     tenant_id: str = Depends(get_tenant_id),
@@ -193,6 +210,22 @@ async def get_document_preview(
     )
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    if processed:
+        artifact = await db.scalar(
+            select(DocumentPreprocessingArtifact).where(
+                DocumentPreprocessingArtifact.document_id == document_id,
+                DocumentPreprocessingArtifact.tenant_id == tenant_id,
+                DocumentPreprocessingArtifact.page == page - 1,
+            )
+        )
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Processed preview page not found")
+        return Response(
+            content=await storage.download(artifact.processed_file_path),
+            media_type="image/png",
+        )
+
     file_bytes = await storage.download(document.file_path)
     from app.adapters.preprocessing.pipeline import load_image_from_bytes, load_pdf_page
 
@@ -207,6 +240,72 @@ async def get_document_preview(
     if not success:
         raise HTTPException(status_code=422, detail="Could not render document preview")
     return Response(content=encoded.tobytes(), media_type="image/png")
+
+
+@router.get(
+    "/{document_id}/preprocessing",
+    response_model=list[PreprocessingArtifactResponse],
+)
+async def get_document_preprocessing(
+    document_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    tenant_id: str = Depends(get_tenant_id),
+):
+    """Return persisted preprocessing metadata and authenticated page URLs."""
+
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    artifacts = await db.scalars(
+        select(DocumentPreprocessingArtifact)
+        .where(
+            DocumentPreprocessingArtifact.document_id == document_id,
+            DocumentPreprocessingArtifact.tenant_id == tenant_id,
+        )
+        .order_by(DocumentPreprocessingArtifact.page)
+    )
+    return [
+        PreprocessingArtifactResponse(
+            id=artifact.id,
+            document_id=artifact.document_id,
+            page=artifact.page,
+            original_width=artifact.original_width,
+            original_height=artifact.original_height,
+            processed_width=artifact.processed_width,
+            processed_height=artifact.processed_height,
+            steps_applied=artifact.steps_applied or [],
+            deskew_angle=artifact.deskew_angle,
+            orientation_correction=artifact.orientation_correction,
+            estimated_dpi=artifact.estimated_dpi,
+            processed_preview_url=(
+                f"/api/v1/documents/{document_id}/preview?page={artifact.page + 1}&processed=true"
+            ),
+        )
+        for artifact in artifacts
+    ]
+
+
+@router.get("/{document_id}/ocr-tokens", response_model=list[OCRTokenResponse])
+async def get_document_ocr_tokens(
+    document_id: str,
+    page: int | None = Query(None, ge=0),
+    db: AsyncSession = Depends(get_db_session),
+    tenant_id: str = Depends(get_tenant_id),
+):
+    document = await db.scalar(
+        select(Document).where(Document.id == document_id, Document.tenant_id == tenant_id)
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    query = select(OCRToken).where(
+        OCRToken.document_id == document_id, OCRToken.tenant_id == tenant_id
+    )
+    if page is not None:
+        query = query.where(OCRToken.page == page)
+    tokens = list(await db.scalars(query.order_by(OCRToken.page, OCRToken.y, OCRToken.x)))
+    return [OCRTokenResponse.model_validate(token, from_attributes=True) for token in tokens]
 
 
 @router.get("", response_model=DocumentListResponse)
@@ -306,10 +405,19 @@ async def correct_field(
         "vendor.name.value",
         "vendor.address.value",
         "vendor.gstin.value",
+        "vendor.pan.value",
+        "vendor.email.value",
+        "vendor.phone.value",
+        "vendor.bank_name.value",
         "vendor.bank_account.value",
+        "vendor.ifsc.value",
         "buyer.name.value",
+        "buyer.address.value",
         "buyer.billing_address.value",
         "buyer.shipping_address.value",
+        "buyer.gstin.value",
+        "buyer.pan.value",
+        "place_of_supply",
         "subtotal",
         "discount_total",
         "tax_total",
@@ -349,11 +457,14 @@ async def correct_field(
         document_id=document_id,
         tenant_id=tenant_id,
         field_path=request.field_path,
-        old_value=None if server_old_value is None else str(server_old_value),
-        new_value=request.new_value,
+        # The server-side extraction is the prediction used for training;
+        # the browser's old_value is advisory and may be stale.
+        old_value=audit_value(server_old_value),
+        new_value=audit_value(request.new_value) or "",
         corrected_by=actor or request.corrected_by,
     )
     db.add(audit)
+    await project_document(db, doc)
 
     await db.commit()
     logger.info("field_corrected", document_id=document_id, field=request.field_path)
@@ -385,6 +496,8 @@ async def get_document_audit_trail(
             new_value=e.new_value,
             corrected_by=e.corrected_by,
             timestamp=e.timestamp,
+            predicted=e.old_value,
+            correct=e.new_value,
         )
         for e in entries
     ]

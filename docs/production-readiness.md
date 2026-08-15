@@ -2,12 +2,12 @@
 
 ## Changes delivered
 
-- Uploads enqueue durable database jobs; extraction runs in `python -m app.worker` rather than FastAPI background tasks. Shared environments reject SQLite, local storage, and embedded workers at startup.
-- Gemini independently verifies every page in parallel with OCR/layout extraction when a key is configured. Its API key is sent in a request header and the default model is pinned to `gemini-3.5-flash-lite`.
-- OpenTelemetry spans cover FastAPI requests, SQLAlchemy queries, queue claims, worker jobs, storage download, preprocessing, OCR, layout extraction, validation, Gemini verification, and persistence. Configure `TRACING_OTLP_ENDPOINT` to export them to an OTLP/HTTP collector.
+- Uploads enqueue durable Supabase Postgres jobs; extraction runs in `python -m app.worker` rather than FastAPI background tasks. Supabase Storage is the only runtime file store.
+- The local-full profile uses PyMuPDF/OpenCV, optional Docling structure extraction, and PaddleOCR PP-StructureV3 with Tesseract fallback. It only invokes local Ollama/Qwen3-VL or llama.cpp when confidence or validation signals require it.
+- OpenTelemetry spans cover FastAPI requests, SQLAlchemy queries, queue claims, worker jobs, storage download, preprocessing, OCR, layout extraction, validation, Ollama verification, and persistence. Configure `TRACING_OTLP_ENDPOINT` to export them to an OTLP/HTTP collector.
 - A single Render Web Service can run the embedded worker for free-tier deployments; this is a budget mode because worker availability follows web-service sleep behavior.
 
-- Digital PDFs now use their embedded text layer and native word coordinates. They bypass PDF rasterisation, OpenCV preprocessing, and Tesseract while retaining review overlays.
+- Digital PDFs use PyMuPDF's embedded text layer and native word coordinates; Docling can add normalized reading order and table structure when installed. They avoid unnecessary raster OCR while retaining review overlays.
 - Scanned documents keep the existing raster OCR path, now rendered at a lower 160 DPI default and without Tesseract's duplicate `image_to_string` invocation.
 - PDF previews render only the selected page rather than every page in the file.
 - Worker extraction is bounded by `PIPELINE_MAX_CONCURRENCY` (default `2`) so a batch cannot exhaust CPU and degrade API responsiveness.
@@ -17,7 +17,7 @@
 
 The durable job queue supports horizontally scaled workers, but the following work remains before calling the deployment production-ready:
 
-- Local-development SQLite and local uploads must not be used for a shared deployment; startup rejects that configuration outside development.
+- Supabase migrations must run with `alembic upgrade head` before the API or worker is deployed. Startup verifies the migrated database but never creates an untracked schema.
 - Worker concurrency and failure recovery have not yet been load-tested across multiple replicas.
 - The current dashboard polls; this is fine for low volume but inefficient at scale.
 

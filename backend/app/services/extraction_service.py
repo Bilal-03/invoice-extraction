@@ -2,8 +2,8 @@
 Extraction Service — Orchestrates the full pipeline.
 
 This service ties all the adapters together:
-  Image -> Preprocessing -> OCR -> Regex Extraction -> Validation
-                               -> (Parallel Gemini verification) -> Final Validation
+  Image -> Preprocessing -> OCR/Layout -> Rule Extraction -> Validation
+                                      -> (confidence-gated local VLM) -> Final Validation
 
 Demonstrates dependency injection: it takes the OCR engine and VLM client
 as dependencies, rather than instantiating them directly.
@@ -12,18 +12,19 @@ as dependencies, rather than instantiating them directly.
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 import numpy as np
 
 from app.adapters.layout.base import LayoutExtractor
 from app.adapters.layout.spatial import SpatialLayoutExtractor
 from app.adapters.ocr.base import OCREngine, OCRResult
-from app.adapters.preprocessing.pipeline import PreprocessingPipeline
+from app.adapters.preprocessing.pipeline import PreprocessingPipeline, PreprocessingResult
 from app.adapters.vlm.base import VLMClient
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.core.tracing import stage_span
-from app.domain.schemas import DocumentStatus, ExtractionSource, FieldValue, InvoiceExtraction
+from app.domain.schemas import DocumentStatus, FieldValue, InvoiceExtraction
 from app.services.validation_service import ValidationService
 
 logger = get_logger(__name__)
@@ -48,10 +49,21 @@ class ExtractionService:
         )
         self.layout_extractor = layout_extractor or SpatialLayoutExtractor()
         self.validator = ValidationService()
+        self.last_preprocessing_results: list[PreprocessingResult] = []
+        self.last_ocr_result: OCRResult | None = None
 
     async def extract_from_image(self, image: np.ndarray) -> InvoiceExtraction:
         """Run the full extraction pipeline on an image."""
         return await self.extract_from_images([image])
+
+    async def preprocess_images(self, images: list[np.ndarray]) -> list[PreprocessingResult]:
+        """Preprocess pages for evidence persistence and optional OCR."""
+
+        results: list[PreprocessingResult] = []
+        for image in images:
+            results.append(await self.preprocessing.process(image))
+        self.last_preprocessing_results = results
+        return results
 
     async def extract_from_ocr_result(
         self,
@@ -59,15 +71,17 @@ class ExtractionService:
         status_callback: Callable[[DocumentStatus], Awaitable[None]] | None = None,
         *,
         verification_image: np.ndarray | None = None,
+        document_structure: dict[str, Any] | None = None,
     ) -> InvoiceExtraction:
         """Extract from a trusted native text layer without raster OCR."""
         start_time = time.time()
-        verification_task = self._start_verification(verification_image)
+        if document_structure is not None:
+            ocr_result.structured_data = document_structure
         if status_callback:
             await status_callback(DocumentStatus.EXTRACTING)
         with stage_span("invoice.layout_extract", page_count=ocr_result.page_count):
             extraction = self.layout_extractor.extract(ocr_result)
-        extraction = await self._merge_verification(extraction, verification_task)
+        extraction.document_structure = document_structure or ocr_result.structured_data
         if status_callback:
             await status_callback(DocumentStatus.VALIDATING)
         with stage_span("invoice.validation", page_count=ocr_result.page_count):
@@ -75,7 +89,16 @@ class ExtractionService:
         extraction.overall_confidence = self._composite_confidence(
             extraction, ocr_result.average_confidence
         )
+        verification_task = self._start_verification(verification_image, extraction)
+        extraction = await self._merge_verification(extraction, verification_task)
+        if verification_task is not None:
+            with stage_span("invoice.validation", page_count=ocr_result.page_count, pass_number=2):
+                extraction.validation_flags = self.validator.validate(extraction)
+            extraction.overall_confidence = self._composite_confidence(
+                extraction, ocr_result.average_confidence
+            )
         extraction.processing_time_ms = int((time.time() - start_time) * 1000)
+        extraction.ensure_standardized()
         logger.info(
             "pipeline_complete_native_pdf", processing_time_ms=extraction.processing_time_ms
         )
@@ -87,15 +110,13 @@ class ExtractionService:
         status_callback: Callable[[DocumentStatus], Awaitable[None]] | None = None,
         *,
         text_hint: str | None = None,
+        document_structure: dict[str, Any] | None = None,
     ) -> InvoiceExtraction:
         """Run one extraction over all pages, retaining per-page OCR coordinates."""
         if not images:
             raise ValueError("At least one page image is required")
         start_time = time.time()
-        # Gemini receives the original colour page while preprocessing, OCR, and
-        # layout extraction proceed. This removes the serial fallback latency and
-        # makes verification a first-class source of evidence.
-        verification_task = self._start_verification(images[0])
+        verification_task: asyncio.Task[InvoiceExtraction] | None = None
 
         try:
 
@@ -107,10 +128,8 @@ class ExtractionService:
             logger.info("pipeline_stage", stage="preprocessing")
             await report(DocumentStatus.PREPROCESSING)
             with stage_span("invoice.preprocessing", page_count=len(images)):
-                processed_pages = []
-                for image in images:
-                    prep_result = await self.preprocessing.process(image)
-                    processed_pages.append(prep_result.image)
+                preprocessing_results = await self.preprocess_images(images)
+                processed_pages = [result.image for result in preprocessing_results]
 
             # 2. OCR every page and combine results without destroying layout metadata
             logger.info("pipeline_stage", stage="ocr", engine=self.ocr_engine.name)
@@ -133,12 +152,16 @@ class ExtractionService:
                 ocr_result.raw_text = text_hint
                 ocr_result.engine_name = f"{ocr_result.engine_name}+pdf_text"
             self.last_ocr_result = ocr_result
+            extraction_structure = document_structure or ocr_result.structured_data
+            if extraction_structure is not None:
+                ocr_result.structured_data = extraction_structure
 
             # 3. Primary Extraction (Regex + Spatial)
             logger.info("pipeline_stage", stage="primary_extraction")
             await report(DocumentStatus.EXTRACTING)
             with stage_span("invoice.layout_extract", page_count=ocr_result.page_count):
                 extraction = self.layout_extractor.extract(ocr_result)
+            extraction.document_structure = extraction_structure
 
             # 4. First pass validation
             logger.info("pipeline_stage", stage="validation_pass_1")
@@ -149,7 +172,9 @@ class ExtractionService:
                 extraction, ocr_result.average_confidence
             )
 
-            # 5. Merge independently produced Gemini verification.
+            # 5. Merge an independently produced VLM verification only when
+            # confidence or validation signals require a second opinion.
+            verification_task = self._start_verification(images[0], extraction)
             extraction = await self._merge_verification(extraction, verification_task)
             with stage_span("invoice.validation", pass_number=2):
                 extraction.validation_flags = self.validator.validate(extraction)
@@ -159,6 +184,7 @@ class ExtractionService:
 
             # 6. Finalize
             extraction.processing_time_ms = int((time.time() - start_time) * 1000)
+            extraction.ensure_standardized()
 
             logger.info(
                 "pipeline_complete",
@@ -180,6 +206,7 @@ class ExtractionService:
         words = [word for result in results for word in result.words]
         confidences = [word.confidence for word in words if word.confidence >= 0]
         dimensions: dict[int, tuple[int, int]] = {}
+        structures = [result.structured_data for result in results if result.structured_data]
         for result in results:
             dimensions.update(result.page_dimensions)
         return OCRResult(
@@ -189,16 +216,46 @@ class ExtractionService:
             engine_name=results[0].engine_name if results else "unknown",
             page_count=len(results),
             page_dimensions=dimensions,
+            structured_data={"pages": structures} if structures else None,
         )
 
     def _start_verification(
-        self, image: np.ndarray | None
+        self,
+        image: np.ndarray | None,
+        existing_extraction: InvoiceExtraction | None = None,
     ) -> asyncio.Task[InvoiceExtraction] | None:
-        if image is None or not self.settings.vlm_enabled or not self.vlm_client:
+        if (
+            image is None
+            or not self.settings.vlm_enabled
+            or not self.vlm_client
+            or existing_extraction is None
+            or not self._needs_verification(existing_extraction)
+        ):
             return None
-        logger.info("pipeline_stage", stage="gemini_verification", mode="parallel")
+        logger.info(
+            "pipeline_stage",
+            stage="vlm_verification",
+            provider=self.vlm_client.name,
+            mode="parallel",
+        )
         return asyncio.create_task(
-            self.vlm_client.extract_fields(image), name="gemini-verification"
+            self.vlm_client.extract_fields(image, existing_extraction), name="vlm-verification"
+        )
+
+    def _needs_verification(self, extraction: InvoiceExtraction) -> bool:
+        required_missing = (
+            not extraction.invoice_number.value
+            or not extraction.vendor.name.value
+            or extraction.grand_total is None
+        )
+        failed_validation = any(
+            not flag.passed and flag.severity.value in {"warning", "error"}
+            for flag in extraction.validation_flags
+        )
+        return (
+            required_missing
+            or failed_validation
+            or extraction.overall_confidence < self.settings.vlm_confidence_threshold
         )
 
     async def _merge_verification(
@@ -207,19 +264,22 @@ class ExtractionService:
         if task is None:
             return extraction
         try:
-            with stage_span("invoice.gemini_verification"):
+            with stage_span(
+                "invoice.vlm_verification",
+                provider=self.vlm_client.name if self.vlm_client else "none",
+            ):
                 verified = await task
             return self._merge_extractions(extraction, verified)
         except Exception as exc:
-            logger.warning("gemini_verification_failed", error=str(exc))
+            logger.warning("vlm_verification_failed", error=str(exc))
             return extraction
 
     def _merge_extractions(
         self, primary: InvoiceExtraction, fallback: InvoiceExtraction
     ) -> InvoiceExtraction:
         """
-        Merge fallback results into the primary extraction.
-        Fallback values win only if the primary value is missing or very low confidence.
+        Merge VLM results into the deterministic extraction.
+        VLM values win only if the primary value is missing or very low confidence.
         """
         merged = primary.model_copy(deep=True)
 
@@ -243,11 +303,15 @@ class ExtractionService:
         )
         merged.vendor.address = choose(primary.vendor.address, fallback.vendor.address)
         merged.vendor.gstin = choose(primary.vendor.gstin, fallback.vendor.gstin)
+        merged.vendor.pan = choose(primary.vendor.pan, fallback.vendor.pan)
         merged.vendor.bank_account = choose(
             primary.vendor.bank_account, fallback.vendor.bank_account
         )
         if primary.buyer and fallback.buyer:
             merged.buyer.name = choose(primary.buyer.name, fallback.buyer.name)
+            merged.buyer.gstin = choose(primary.buyer.gstin, fallback.buyer.gstin)
+            merged.buyer.pan = choose(primary.buyer.pan, fallback.buyer.pan)
+            merged.buyer.address = choose(primary.buyer.address, fallback.buyer.address)
             merged.buyer.billing_address = choose(
                 primary.buyer.billing_address, fallback.buyer.billing_address
             )
@@ -293,7 +357,7 @@ class ExtractionService:
         merged.vlm_output_tokens = fallback.vlm_output_tokens
         merged.estimated_cost_usd = fallback.estimated_cost_usd
         merged.field_locations.update(fallback.field_locations)
-        merged.extraction_source = ExtractionSource.VLM_FALLBACK
+        merged.extraction_source = fallback.extraction_source
         logger.info("merge_strategy", strategy="field_confidence_merge")
         return merged
 

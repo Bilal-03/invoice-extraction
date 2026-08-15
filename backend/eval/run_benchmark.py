@@ -145,7 +145,10 @@ def score_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             "p95": round(ordered_latencies[p95_index], 2) if latencies else 0,
         },
         "sources": dict(sources),
-        "vlm_fallback_rate": round(sources.get("vlm_fallback", 0) / max(1, total), 4),
+        "vlm_fallback_rate": round(
+            sum(sources.get(source, 0) for source in ("vlm_fallback", "local_vlm")) / max(1, total),
+            4,
+        ),
         "ocr": {
             stage: {
                 "cer": round(values["characters"] / max(1, values["character_total"]), 4),

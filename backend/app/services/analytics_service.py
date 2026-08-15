@@ -4,11 +4,12 @@ Analytics Service — Data aggregation and reporting.
 Translates raw document rows into business metrics.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.compat import UTC
 from app.domain.entities import Document
 from app.domain.schemas import (
     AnalyticsSummary,

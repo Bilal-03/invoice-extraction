@@ -14,7 +14,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 from sqlalchemy import text
 
-from app.api.v1.routers import analytics, auth, documents
+from app.api.v1.routers import analytics, ap, auth, documents
 from app.core.config import get_settings
 from app.core.database import async_session_factory, init_db
 from app.core.logging import get_logger, setup_logging
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("application_startup")
 
-    # Initialize the database (creates tables in SQLite)
+    # Verify the Alembic-managed Supabase schema is reachable.
     try:
         await init_db()
         logger.info("database_initialized")
@@ -94,6 +94,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(documents.router, prefix=f"/api/{settings.api_version}")
+app.include_router(ap.router, prefix=f"/api/{settings.api_version}")
 app.include_router(analytics.router, prefix=f"/api/{settings.api_version}")
 app.include_router(auth.router, prefix=f"/api/{settings.api_version}")
 

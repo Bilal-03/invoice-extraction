@@ -13,6 +13,7 @@ from "engineered backend service."
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -51,6 +52,7 @@ class OCRResult:
     engine_name: str = "unknown"
     page_count: int = 1
     page_dimensions: dict[int, tuple[int, int]] = field(default_factory=dict)
+    structured_data: dict[str, Any] | None = None
 
     def text_in_region(self, x0: int, y0: int, x1: int, y1: int, page: int = 0) -> list[OCRWord]:
         """Return all words whose bounding box overlaps the given region."""
@@ -90,14 +92,22 @@ class OCRResult:
 
         return lines
 
+    def all_lines(self, line_threshold: int = 10) -> list[list[OCRWord]]:
+        """Group OCR words into visual lines across every document page."""
+
+        pages = sorted({word.page for word in self.words})
+        if not pages:
+            pages = list(range(max(self.page_count, 1)))
+        return [line for page in pages for line in self.lines(page, line_threshold)]
+
 
 class OCREngine(ABC):
     """
     Abstract base class for OCR engines.
 
     Implementations:
-      - TesseractOCR: System Tesseract via pytesseract (default)
-      - PaddleOCREngine: PaddleOCR PP-OCRv4 (optional, higher accuracy)
+      - PaddleStructureV3OCREngine: PaddleOCR PP-StructureV3 (local-full primary)
+      - TesseractOCR: System Tesseract via pytesseract (resilient fallback)
 
     The interface guarantees word-level bounding boxes and confidence
     scores, not just raw text — this is critical for spatial extraction.

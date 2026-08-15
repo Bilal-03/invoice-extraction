@@ -29,10 +29,13 @@ from app.domain.schemas import (
     TaxType,
     VendorDetails,
 )
-from app.services.extractors.amounts import AmountExtractor
-from app.services.extractors.dates import DateExtractor
-from app.services.extractors.line_items import LineItemExtractor
-from app.services.extractors.parties import PartyExtractor
+from app.extraction.amounts import extract_amounts
+from app.extraction.buyer import extract_buyer
+from app.extraction.invoice_date import extract_dates
+from app.extraction.invoice_number import extract_invoice_number
+from app.extraction.line_items import extract_line_items
+from app.extraction.payment import extract_payment_terms
+from app.extraction.supplier import extract_supplier
 
 logger = get_logger(__name__)
 
@@ -42,7 +45,8 @@ logger = get_logger(__name__)
 # Invoice number patterns (ordered by specificity — most specific first)
 INVOICE_NUMBER_PATTERNS = [
     re.compile(
-        r"(?:invoice|inv|bill)\s*(?:number|num|no\.?|#)[.:#\-\s]*([A-Z0-9][\w\-/]+)",
+        r"(?:tax\s+invoice|invoice|inv|bill|reference|ref)\s*"
+        r"(?:number|num|no\.?|#)[.:#\-\s]*([A-Z0-9][\w\-/]+)",
         re.IGNORECASE,
     ),
     re.compile(r"\binv(?:oice)?[.\-#:\s]+([A-Z0-9][\w\-/]+)", re.IGNORECASE),
@@ -139,18 +143,18 @@ class FieldExtractor:
         """Run all extractors and compose the InvoiceExtraction result."""
         self._ocr_result = ocr_result
         text = ocr_result.raw_text
-        words = ocr_result.words
 
-        # Family boundaries are explicit even while the mature regex matchers
-        # remain on this compatibility class. Each family can now move behind
-        # its own protocol implementation without changing the schema.
-        dates = DateExtractor(self).extract(ocr_result)
-        parties = PartyExtractor(self).extract(ocr_result)
-        amounts = AmountExtractor(self).extract(ocr_result)
-        line_items = LineItemExtractor(self).extract(ocr_result)
+        # Explicit deterministic rule families are the primary path.  The
+        # legacy methods remain on this class as compatibility helpers for
+        # older callers and for the mature table/amount heuristics.
+        dates = extract_dates(ocr_result)
+        vendor = extract_supplier(ocr_result, self)
+        buyer = extract_buyer(ocr_result, self)
+        amounts = extract_amounts(ocr_result, self)
+        line_items = extract_line_items(ocr_result, self)
 
         # Extract each field group
-        invoice_number = self._extract_invoice_number(text, words)
+        invoice_number = extract_invoice_number(ocr_result)
         invoice_date = dates["invoice_date"]
         due_date = dates["due_date"]
         po_reference = self._extract_labeled_value(
@@ -163,11 +167,7 @@ class FieldExtractor:
         )
         if po_reference and po_reference.value:
             po_reference.value = po_reference.value.replace(" ", "")
-        payment_terms = self._extract_labeled_text(
-            text, r"(?:payment terms?|terms)\s*[:\-]\s*([^\n\r]{2,80})"
-        )
-        vendor = parties["vendor"]
-        buyer = parties["buyer"]
+        payment_terms = extract_payment_terms(ocr_result)
         taxes = amounts["taxes"]
         grand_total = amounts["grand_total"]
         subtotal = amounts["subtotal"]
@@ -246,7 +246,7 @@ class FieldExtractor:
                 confidence = max(0.5, 0.95 - i * 0.1)
                 return self._field_value(value, confidence)
 
-        return FieldValue(value=None, confidence=0.0, source=ExtractionSource.OCR_REGEX)
+        return FieldValue(value=None, confidence=0.0, source=ExtractionSource.OCR_RULE)
 
     def _extract_date(
         self,
@@ -337,20 +337,26 @@ class FieldExtractor:
             side="left",
             stop_labels=("pan no", "gst registration", "order number"),
         )
-        if spatial_section:
+        # A flat OCR layout can place GST/PAN/summary lines directly under a
+        # seller label.  Do not mistake those metadata lines for the supplier
+        # name just because they happen to share the left half of the page.
+        if spatial_section and any(self._looks_like_party_line(line) for line in spatial_section):
             section = spatial_section
         if section:
             meaningful = [
                 line
                 for line in section
-                if not re.match(r"(?i)^(pan|gst|tax id|vat)\s*(?:no|number)?\s*[:#]", line)
+                if not re.match(
+                    r"(?i)^(?:pan|gst(?:in)?|tax id|vat)\s*(?:no|number|in)?\s*[:#]",
+                    line,
+                )
             ]
             if meaningful:
                 vendor_name = self._field_value(meaningful[0].lstrip("*•- "), 0.94)
                 address_lines = [
                     line.lstrip("*•- ")
                     for line in meaningful[1:]
-                    if not re.match(r"(?i)^(pan|gst|tax id|vat)\b", line)
+                    if not re.match(r"(?i)^(?:pan|gst(?:in)?|tax id|vat)\b", line)
                 ]
                 if address_lines:
                     vendor_address = self._field_value(", ".join(address_lines), 0.9)
@@ -385,6 +391,15 @@ class FieldExtractor:
             name=vendor_name,
             address=vendor_address,
             gstin=gstin,
+        )
+
+    @staticmethod
+    def _looks_like_party_line(line: str) -> bool:
+        """Return whether a spatial line can plausibly name a supplier."""
+
+        return not re.match(
+            r"(?i)^(?:pan|gst(?:in)?|tax id|vat|invoice|due|date|grand total|total)\b",
+            line.strip(),
         )
 
     def _extract_buyer(
@@ -427,9 +442,13 @@ class FieldExtractor:
                 side="right",
                 stop_labels=("place of supply", "place of delivery", "order number"),
             )
-            if spatial_billing:
+            if spatial_billing and any(
+                self._looks_like_party_line(line) for line in spatial_billing
+            ):
                 billing = spatial_billing
-            if spatial_shipping:
+            if spatial_shipping and any(
+                self._looks_like_party_line(line) for line in spatial_shipping
+            ):
                 shipping = spatial_shipping
         if not billing and not shipping:
             return None
@@ -945,28 +964,35 @@ class FieldExtractor:
         result = getattr(self, "_ocr_result", None)
         if result is None:
             return None
-        needles = [part.lower() for part in re.findall(r"[A-Z0-9]+", value, re.IGNORECASE)]
-        if not needles:
+        target = re.sub(r"[^a-z0-9]", "", value.casefold())
+        if not target:
             return None
-        words = result.words
+        words = sorted(result.words, key=lambda word: (word.page, word.y, word.x))
         for start in range(len(words)):
-            candidates = words[start : start + len(needles)]
-            if len(candidates) != len(needles) or len({w.page for w in candidates}) != 1:
-                continue
-            normalized = [re.sub(r"[^a-z0-9]", "", w.text.lower()) for w in candidates]
-            if normalized != [re.sub(r"[^a-z0-9]", "", n) for n in needles]:
-                continue
-            page = candidates[0].page
-            width, height = result.page_dimensions.get(page, (0, 0))
-            if not width or not height:
-                return None
-            return BoundingBox(
-                x0=max(0.0, min(w.x for w in candidates) / width),
-                y0=max(0.0, min(w.y for w in candidates) / height),
-                x1=min(1.0, max(w.x + w.width for w in candidates) / width),
-                y1=min(1.0, max(w.y + w.height for w in candidates) / height),
-                page=page,
-            )
+            joined = ""
+            candidates: list[OCRWord] = []
+            for word in words[start : start + 12]:
+                if candidates and word.page != candidates[-1].page:
+                    break
+                part = re.sub(r"[^a-z0-9]", "", word.text.casefold())
+                if not part:
+                    continue
+                joined += part
+                candidates.append(word)
+                if joined == target:
+                    page = candidates[0].page
+                    width, height = result.page_dimensions.get(page, (0, 0))
+                    if not width or not height:
+                        return None
+                    return BoundingBox(
+                        x0=max(0.0, min(w.x for w in candidates) / width),
+                        y0=max(0.0, min(w.y for w in candidates) / height),
+                        x1=min(1.0, max(w.x + w.width for w in candidates) / width),
+                        y1=min(1.0, max(w.y + w.height for w in candidates) / height),
+                        page=page,
+                    )
+                if len(joined) >= len(target):
+                    break
         return None
 
     def _extract_labeled_value(self, text: str, patterns: list[str]) -> FieldValue | None:

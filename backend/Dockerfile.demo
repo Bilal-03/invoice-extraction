@@ -1,0 +1,29 @@
+# Lightweight portfolio/demo image. Use Dockerfile for the full PaddleOCR stack.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        libglib2.0-0 \
+        libgl1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+COPY app ./app
+COPY eval ./eval
+COPY alembic.ini ./
+COPY alembic ./alembic
+
+RUN python -m pip install --no-cache-dir .
+
+EXPOSE 8000
+
+# Render supplies PORT at runtime; keep 8000 as the local/default fallback.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

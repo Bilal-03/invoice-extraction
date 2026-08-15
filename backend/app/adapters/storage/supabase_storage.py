@@ -28,7 +28,10 @@ class SupabaseStorage(ObjectStorage):
                 headers={
                     **self.headers,
                     "Content-Type": "application/octet-stream",
-                    "x-upsert": "false",
+                    # Processed page keys are deterministic so reprocessing a
+                    # document replaces the previous evidence instead of
+                    # leaving orphaned objects behind.
+                    "x-upsert": "true",
                 },
                 content=file_bytes,
                 timeout=60,

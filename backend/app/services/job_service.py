@@ -1,10 +1,11 @@
-"""Durable queue and event helpers backed by Postgres/SQLite for local development."""
+"""Durable queue and audit-event helpers backed by Supabase Postgres."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.compat import UTC
 from app.domain.entities import DocumentEvent, DocumentJob
 
 

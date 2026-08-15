@@ -6,11 +6,13 @@ impactful than swapping OCR engines. Each step is independently
 toggleable and logged so you can benchmark before/after impact.
 
 Pipeline stages:
-  1. Grayscale conversion
-  2. Adaptive thresholding (kept from original app.py)
-  3. Deskew via Hough transform
-  4. Orientation correction via Tesseract OSD
+  1. Resize to an OCR-friendly working resolution
+  2. Grayscale conversion
+  3. Orientation correction via Tesseract OSD (best-effort)
+  4. Deskew via Hough transform
   5. Denoising (conditional — skipped for clean digital PDFs)
+  6. Local contrast enhancement
+  7. Adaptive thresholding
 """
 
 import asyncio
@@ -69,33 +71,52 @@ class PreprocessingPipeline:
             original_shape=image.shape,
         )
 
-        # 1. Grayscale conversion
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # 1. Resize very small scans up for OCR, and cap very large camera
+        # images so preprocessing remains bounded on the worker.  The review
+        # layer uses normalized coordinates, so this does not lose evidence.
+        working = self._resize_for_ocr(image, result)
+
+        # 2. Grayscale conversion
+        if len(working.shape) == 3:
+            gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
             result.steps_applied.append("grayscale")
         else:
-            gray = image.copy()
+            gray = working.copy()
+
+        # 3. Correct whole-page rotations before line-based deskewing. OSD is
+        # deliberately best-effort: an unavailable/uncertain orientation must
+        # never make an otherwise usable invoice fail.
+        if self.orient:
+            gray, orientation = self._correct_orientation(gray)
+            result.orientation_correction = orientation
+            if orientation:
+                result.steps_applied.append(f"orientation({orientation}°)")
 
         # 2. Estimate quality to decide on denoising
         estimated_dpi = self._estimate_dpi(gray)
         result.estimated_dpi = estimated_dpi
         is_clean = estimated_dpi is not None and estimated_dpi >= 200
 
-        # 3. Deskew via Hough transform
+        # 4. Deskew via Hough transform
         if self.deskew:
             gray, angle = self._deskew_image(gray)
             result.deskew_angle = angle
             if abs(angle) > 0.1:
                 result.steps_applied.append(f"deskew({angle:.1f}°)")
 
-        # 4. Denoising (skip for clean digital documents)
+        # 5. Denoising (skip for clean digital documents)
         if self.denoise and not is_clean:
             gray = cv2.fastNlMeansDenoising(gray, h=10, templateWindowSize=7, searchWindowSize=21)
             result.steps_applied.append("denoise")
         elif is_clean:
             result.steps_applied.append("denoise_skipped(clean_doc)")
 
-        # 5. Adaptive thresholding (kept from original — it works well)
+        # 6. Contrast enhancement makes faint ink and photographed invoices
+        # more legible without hard-coding a global brightness threshold.
+        gray = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+        result.steps_applied.append("contrast_clahe")
+
+        # 7. Adaptive thresholding (kept from original — it works well)
         processed = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
         )
@@ -113,6 +134,48 @@ class PreprocessingPipeline:
         )
 
         return result
+
+    @staticmethod
+    def _resize_for_ocr(image: np.ndarray, result: PreprocessingResult) -> np.ndarray:
+        """Normalize working resolution while preserving the original source."""
+
+        height, width = image.shape[:2]
+        if min(height, width) <= 0:
+            raise ValueError("Image has invalid dimensions")
+        min_dimension = 1200
+        max_dimension = 2400
+        scale = max(1.0, min_dimension / min(height, width))
+        if max(height, width) * scale > max_dimension:
+            scale = max_dimension / max(height, width)
+        if abs(scale - 1.0) < 0.01:
+            return image.copy()
+        interpolation = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+        resized = cv2.resize(image, None, fx=scale, fy=scale, interpolation=interpolation)
+        result.steps_applied.append(
+            f"resize({width}x{height}->{resized.shape[1]}x{resized.shape[0]})"
+        )
+        return resized
+
+    @staticmethod
+    def _correct_orientation(image: np.ndarray) -> tuple[np.ndarray, int]:
+        """Use Tesseract OSD when available; return the unchanged image otherwise."""
+
+        try:
+            import pytesseract
+
+            osd = pytesseract.image_to_osd(image, config="--psm 0")
+            match = re.search(r"Rotate:\s*(\d+)", osd)
+            rotation = int(match.group(1)) % 360 if match else 0
+        except Exception:
+            return image, 0
+
+        if rotation == 90:
+            return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE), rotation
+        if rotation == 180:
+            return cv2.rotate(image, cv2.ROTATE_180), rotation
+        if rotation == 270:
+            return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE), rotation
+        return image, 0
 
     def _deskew_image(self, image: np.ndarray) -> tuple[np.ndarray, float]:
         """
@@ -190,11 +253,23 @@ class PreprocessingPipeline:
 
 
 def load_image_from_bytes(file_bytes: bytes) -> np.ndarray:
-    """Convert raw file bytes to an OpenCV image array."""
+    """Convert raw file bytes to an OpenCV image array.
+
+    OpenCV handles the common path; Pillow provides a safe decoder fallback
+    for image variants (notably some TIFF exports) that OpenCV cannot read.
+    """
     image_np = np.frombuffer(file_bytes, np.uint8)
     image = cv2.imdecode(image_np, cv2.IMREAD_COLOR)
     if image is None:
-        raise ValueError("Failed to decode image from bytes")
+        from io import BytesIO
+
+        from PIL import Image
+
+        try:
+            rgb = np.asarray(Image.open(BytesIO(file_bytes)).convert("RGB"))
+            image = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        except Exception as exc:
+            raise ValueError("Failed to decode image from bytes") from exc
     return image
 
 

@@ -1,0 +1,49 @@
+services:
+  # Free-tier Render profile. It deliberately uses the lightweight image and
+  # deterministic Tesseract/rules pipeline; PaddleOCR and Ollama remain in
+  # the local-full Docker profile.
+  - type: web
+    name: invoice-intelligence-api
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./backend/Dockerfile.demo
+    dockerContext: ./backend
+    dockerCommand: "/bin/sh -c 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}'"
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: LOG_JSON
+        value: "true"
+      - key: PIPELINE_PROFILE
+        value: demo-lite
+      - key: OCR_ENGINE
+        value: tesseract
+      - key: DOCUMENT_PARSER
+        value: pymupdf
+      - key: LAYOUT_ENGINE
+        value: spatial-rules
+      - key: VLM_ENABLED
+        value: "false"
+      - key: VLM_PROVIDER
+        value: none
+      - key: STORAGE_BACKEND
+        value: supabase
+      - key: SUPABASE_STORAGE_BUCKET
+        value: documents
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: EMBEDDED_WORKER_ENABLED
+        value: "true"
+      - key: TRACING_ENABLED
+        value: "false"

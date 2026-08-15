@@ -2,9 +2,15 @@
 
 import asyncio
 import socket
-from datetime import UTC, datetime
+from datetime import datetime
 
-from app.api.v1.deps import build_ocr_engine, build_storage, build_vlm_client
+from app.api.v1.deps import (
+    build_document_parser,
+    build_ocr_engine,
+    build_storage,
+    build_vlm_client,
+)
+from app.core.compat import UTC
 from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.logging import get_logger, setup_logging
@@ -23,6 +29,7 @@ async def run_worker() -> None:
     storage = build_storage(settings)
     ocr_engine = build_ocr_engine(settings)
     vlm_client = build_vlm_client(settings)
+    document_parser = build_document_parser(settings)
     logger.info("worker_started", worker_id=worker_id)
 
     while True:
@@ -45,7 +52,13 @@ async def run_worker() -> None:
                 attempt=job.attempt_count,
                 queue_wait_seconds=max(0.0, (datetime.now(UTC) - created_at).total_seconds()),
             ):
-                await run_extraction_pipeline(job.document_id, storage, ocr_engine, vlm_client)
+                await run_extraction_pipeline(
+                    job.document_id,
+                    storage,
+                    ocr_engine,
+                    vlm_client,
+                    document_parser,
+                )
             async with async_session_factory() as session:
                 fresh_job = await session.get(type(job), job.id)
                 document = await session.get(Document, job.document_id)

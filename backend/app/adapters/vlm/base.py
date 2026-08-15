@@ -11,10 +11,11 @@ VLM is triggered when:
 """
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 
-from app.domain.schemas import InvoiceExtraction
+from app.domain.schemas import InvoiceExtraction, InvoiceQuestionResponse
 
 
 class VLMClient(ABC):
@@ -55,3 +56,13 @@ class VLMClient(ABC):
     async def health_check(self) -> bool:
         """Verify the VLM API is reachable."""
         ...
+
+    async def answer_question(
+        self,
+        question: str,
+        invoice_json: dict[str, Any],
+        ocr_text: str,
+    ) -> InvoiceQuestionResponse:
+        """Answer a grounded invoice question when the provider supports it."""
+
+        raise NotImplementedError(f"{self.name} does not support invoice Q&A")

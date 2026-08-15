@@ -1,12 +1,6 @@
-"""
-Async SQLAlchemy database setup.
+"""Async SQLAlchemy setup for the Supabase PostgreSQL database."""
 
-Uses aiosqlite for zero-config local development. Swap the DATABASE_URL
-environment variable to a SQLite database path.
-"""
-
-from pathlib import Path
-
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -14,22 +8,10 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
-# Ensure the data directory exists
-_db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
-if _db_path:
-    Path(_db_path).parent.mkdir(parents=True, exist_ok=True)
-
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
-    # SQLite needs these for async compatibility
-    connect_args=(
-        {"check_same_thread": False}
-        if "sqlite" in settings.database_url
-        else {"ssl": "require"}
-        if "supabase.com" in settings.database_url
-        else {}
-    ),
+    connect_args={"ssl": "require"},
     pool_pre_ping=True,
 )
 
@@ -47,9 +29,13 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """Create all tables. Called on application startup."""
+    """Verify the migrated Supabase database is reachable.
+
+    Schema changes are intentionally owned by Alembic. The API must never
+    create an untracked local schema on startup.
+    """
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("SELECT 1"))
 
 
 async def get_db_session() -> AsyncSession:

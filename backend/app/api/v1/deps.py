@@ -13,11 +13,19 @@ from fastapi import Depends
 from app.adapters.ocr.base import OCREngine
 from app.adapters.ocr.tesseract_ocr import TesseractOCR
 from app.adapters.storage.base import ObjectStorage
-from app.adapters.storage.local_storage import LocalStorage
 from app.adapters.storage.supabase_storage import SupabaseStorage
 from app.adapters.vlm.base import VLMClient
-from app.adapters.vlm.gemini_client import GeminiVLMClient
-from app.core.config import OCREngineType, Settings, StorageBackend, get_settings
+from app.adapters.vlm.llama_cpp_client import LlamaCppVLMClient
+from app.adapters.vlm.ollama_client import OllamaVLMClient
+from app.core.config import (
+    DocumentParserType,
+    OCREngineType,
+    PipelineProfile,
+    Settings,
+    StorageBackend,
+    VLMProvider,
+    get_settings,
+)
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -29,42 +37,66 @@ _VLM_INSTANCE: VLMClient | None = None
 
 
 def build_storage(settings: Settings) -> ObjectStorage:
-    if settings.storage_backend == StorageBackend.SUPABASE:
-        if not settings.supabase_url or not settings.supabase_service_role_key:
-            if settings.environment.value == "development":
-                logger.warning("supabase_storage_not_configured_using_explicit_dev_local_storage")
-                return LocalStorage(base_dir=settings.upload_dir)
-            raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
-        return SupabaseStorage(
-            settings.supabase_url,
-            settings.supabase_service_role_key,
-            settings.supabase_storage_bucket,
-        )
-    return LocalStorage(base_dir=settings.upload_dir)
+    if settings.storage_backend != StorageBackend.SUPABASE:
+        raise RuntimeError("Supabase Storage is the only supported runtime file store")
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required")
+    return SupabaseStorage(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+        settings.supabase_storage_bucket,
+    )
 
 
 def build_ocr_engine(settings: Settings) -> OCREngine:
-    if settings.ocr_engine == OCREngineType.PADDLEOCR:
+    if settings.pipeline_profile == PipelineProfile.LOCAL_FULL or settings.ocr_engine in {
+        OCREngineType.PADDLEOCR,
+        OCREngineType.PP_STRUCTURE_V3,
+    }:
         try:
-            from app.adapters.ocr.paddle_ocr import PaddleOCREngine
+            from app.adapters.ocr.paddle_structure import PaddleStructureV3OCREngine
 
-            primary = PaddleOCREngine()
+            primary = PaddleStructureV3OCREngine(device=settings.paddle_device)
             if settings.ocr_fallback_enabled:
                 from app.adapters.ocr.fallback import FallbackOCREngine
 
-                return FallbackOCREngine(primary, TesseractOCR())
+                return FallbackOCREngine(primary, TesseractOCR(settings.tesseract_cmd))
             return primary
-        except (ImportError, RuntimeError):
-            logger.warning("paddleocr_fallback_to_tesseract")
-    return TesseractOCR()
+        except Exception as exc:
+            logger.warning("paddle_structure_fallback_to_tesseract", error=str(exc))
+
+    return TesseractOCR(settings.tesseract_cmd)
 
 
 def build_vlm_client(settings: Settings) -> VLMClient | None:
-    if settings.vlm_enabled and settings.gemini_api_key:
-        return GeminiVLMClient(api_key=settings.gemini_api_key, model=settings.vlm_model)
-    if settings.vlm_enabled:
-        logger.warning("vlm_enabled_but_no_api_key")
+    if (
+        settings.pipeline_profile == PipelineProfile.DEMO_LITE
+        or not settings.vlm_enabled
+        or settings.vlm_provider == VLMProvider.NONE
+    ):
+        return None
+    if settings.vlm_provider == VLMProvider.OLLAMA:
+        return OllamaVLMClient(settings.ollama_base_url, settings.ollama_model)
+    if settings.vlm_provider == VLMProvider.LLAMA_CPP:
+        return LlamaCppVLMClient(settings.llama_cpp_base_url, settings.llama_cpp_model)
+    logger.warning("configured_vlm_provider_unavailable", provider=settings.vlm_provider.value)
     return None
+
+
+def build_document_parser(settings: Settings):
+    """Build the optional Docling parser, falling back to the PyMuPDF path."""
+    if settings.document_parser == DocumentParserType.PYMUPDF:
+        return None
+    try:
+        from app.adapters.parsing.docling_parser import DoclingDocumentParser
+
+        return DoclingDocumentParser()
+    except Exception as exc:
+        if settings.document_parser == DocumentParserType.DOCLING:
+            logger.warning("docling_unavailable_using_pymupdf", error=str(exc))
+        else:
+            logger.info("docling_not_installed_using_pymupdf", error=str(exc))
+        return None
 
 
 async def get_storage(
