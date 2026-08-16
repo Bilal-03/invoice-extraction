@@ -26,4 +26,6 @@ RUN python -m pip install --no-cache-dir .
 EXPOSE 8000
 
 # Render supplies PORT at runtime; keep 8000 as the local/default fallback.
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Run migrations in the container command because Render's free plan does not
+# provide a separate pre-deploy command.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
