@@ -100,9 +100,7 @@ def validate_gst_mode(extraction: InvoiceExtraction) -> ValidationFlag:
 
     seller_state = _gstin_state(extraction.vendor.gstin.value if extraction.vendor.gstin else None)
     buyer_state = _gstin_state(
-        extraction.buyer.gstin.value
-        if extraction.buyer and extraction.buyer.gstin
-        else None
+        extraction.buyer.gstin.value if extraction.buyer and extraction.buyer.gstin else None
     ) or _place_of_supply_state(extraction.place_of_supply)
     expected = None
     if seller_state and buyer_state:
@@ -129,10 +127,7 @@ def validate_gst_mode(extraction: InvoiceExtraction) -> ValidationFlag:
     return ValidationFlag(
         rule="gst_mode_consistency",
         passed=True,
-        message=(
-            f"GST mode is internally consistent ({actual or 'unspecified'}). "
-            f"{disclaimer}"
-        ),
+        message=(f"GST mode is internally consistent ({actual or 'unspecified'}). {disclaimer}"),
         severity=ValidationSeverity.INFO,
         details=details,
     )

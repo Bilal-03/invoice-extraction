@@ -111,10 +111,7 @@ def test_duplicate_fingerprint_uses_supplier_number_date_and_total() -> None:
     assert fingerprint is not None
     assert len(fingerprint) == 64
     assert validate_duplicate(extraction, existing_fingerprints=[fingerprint]).passed is False
-    assert (
-        duplicate_fingerprint(_extraction(invoice_date="13 Aug 2026"))
-        != fingerprint
-    )
+    assert duplicate_fingerprint(_extraction(invoice_date="13 Aug 2026")) != fingerprint
 
 
 def test_amount_validator_can_use_line_items_when_subtotal_is_missing() -> None:

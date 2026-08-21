@@ -95,8 +95,7 @@ def validate_dates(extraction: InvoiceExtraction) -> list[ValidationFlag]:
                 rule="date_future",
                 passed=False,
                 message=(
-                    "Invoice date is more than one year in the future: "
-                    f"{extraction.invoice_date}"
+                    f"Invoice date is more than one year in the future: {extraction.invoice_date}"
                 ),
                 severity=ValidationSeverity.WARNING,
             )

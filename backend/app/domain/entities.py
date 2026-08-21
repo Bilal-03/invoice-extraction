@@ -288,15 +288,9 @@ class Invoice(Base):
     tax_total: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
     )
-    cgst: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2), default=Decimal("0.00"), nullable=False
-    )
-    sgst: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2), default=Decimal("0.00"), nullable=False
-    )
-    igst: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2), default=Decimal("0.00"), nullable=False
-    )
+    cgst: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"), nullable=False)
+    sgst: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"), nullable=False)
+    igst: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"), nullable=False)
     grand_total: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     outstanding_amount: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
@@ -333,9 +327,7 @@ class InvoiceItem(Base):
     unit_price: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
     )
-    rate: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2), default=Decimal("0.00"), nullable=False
-    )
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"), nullable=False)
     discount: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
     )
@@ -346,9 +338,7 @@ class InvoiceItem(Base):
     tax_amount: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
     )
-    tax: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2), default=Decimal("0.00"), nullable=False
-    )
+    tax: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal("0.00"), nullable=False)
     line_total: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal("0.00"), nullable=False
     )

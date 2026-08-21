@@ -48,7 +48,7 @@ USER QUESTION:
 {question}
 
 INVOICE JSON:
-{json.dumps(invoice_json, ensure_ascii=False, separators=(',', ':'))}
+{json.dumps(invoice_json, ensure_ascii=False, separators=(",", ":"))}
 
 OCR TEXT:
 <ocr_text>
@@ -136,8 +136,7 @@ class OllamaVLMClient(VLMClient):
                 if not models:
                     return False
                 return any(
-                    isinstance(model, dict)
-                    and model.get("name", model.get("model")) == self.model
+                    isinstance(model, dict) and model.get("name", model.get("model")) == self.model
                     for model in models
                 )
         except Exception as exc:

@@ -141,12 +141,7 @@ async def _upsert_vendor(
         session.add(vendor)
         await session.flush()
 
-    if (
-        not is_new
-        and gstin
-        and vendor.gstin
-        and normalize_gstin(vendor.gstin) != gstin
-    ):
+    if not is_new and gstin and vendor.gstin and normalize_gstin(vendor.gstin) != gstin:
         risk_signals["gstin_mismatch"] = {
             "vendor_master": vendor.gstin,
             "invoice": gstin,
@@ -246,8 +241,7 @@ async def _find_po_match(
             (
                 item
                 for item in po_items
-                if item.id not in matched_po_item_ids
-                and normalize_text(item.description) == needle
+                if item.id not in matched_po_item_ids and normalize_text(item.description) == needle
             ),
             None,
         )
@@ -354,7 +348,7 @@ async def _find_po_match(
         received_by_po_item[receipt_item.purchase_order_item_id] = (
             received_by_po_item.get(receipt_item.purchase_order_item_id, Decimal("0"))
             + receipt_item.quantity_received
-    )
+        )
     receipt_mismatches: list[dict] = []
     if receipt_items:
         for po_item in po_items:
@@ -472,9 +466,7 @@ def _risk_inputs(
                 "Vendor was not in the vendor master; a new vendor record was created",
                 {
                     "vendor_name": extraction.vendor.name.value,
-                    "gstin": extraction.vendor.gstin.value
-                    if extraction.vendor.gstin
-                    else None,
+                    "gstin": extraction.vendor.gstin.value if extraction.vendor.gstin else None,
                 },
             )
         )
@@ -604,10 +596,7 @@ async def _find_duplicate_invoice(
     if fingerprint:
         legacy_filters.append(Invoice.duplicate_fingerprint.is_(None))
     legacy_match = await session.scalar(
-        select(Invoice)
-        .where(*legacy_filters)
-        .order_by(Invoice.created_at, Invoice.id)
-        .limit(1)
+        select(Invoice).where(*legacy_filters).order_by(Invoice.created_at, Invoice.id).limit(1)
     )
     return (legacy_match, "legacy_business_key") if legacy_match is not None else (None, None)
 
@@ -638,10 +627,7 @@ async def _find_repeated_invoice_number(
     if current_invoice is not None:
         filters.append(Invoice.id != current_invoice.id)
     return await session.scalar(
-        select(Invoice)
-        .where(*filters)
-        .order_by(Invoice.created_at, Invoice.id)
-        .limit(1)
+        select(Invoice).where(*filters).order_by(Invoice.created_at, Invoice.id).limit(1)
     )
 
 
@@ -702,9 +688,7 @@ async def project_document(
     # extraction payloads before projecting to the relational AP aggregate.
     extraction.ensure_standardized()
     tenant_id = document.tenant_id
-    vendor, new_vendor, vendor_risk_signals = await _upsert_vendor(
-        session, extraction, tenant_id
-    )
+    vendor, new_vendor, vendor_risk_signals = await _upsert_vendor(session, extraction, tenant_id)
     fingerprint = duplicate_fingerprint(extraction)
     fingerprint_components = duplicate_fingerprint_components(extraction)
     invoice = await session.scalar(
@@ -861,9 +845,7 @@ async def project_document(
         repeated_details = {
             "previous_invoice_id": repeated_invoice.id,
             "previous_invoice_date": (
-                repeated_invoice.invoice_date.isoformat()
-                if repeated_invoice.invoice_date
-                else None
+                repeated_invoice.invoice_date.isoformat() if repeated_invoice.invoice_date else None
             ),
             "previous_amount": str(decimal_value(repeated_invoice.grand_total)),
             "invoice_number": invoice.invoice_number,
@@ -901,11 +883,7 @@ async def project_document(
                 passed=flag.passed,
                 severity=flag.severity.value,
                 message=flag.message,
-                details=(
-                    match_details
-                    if flag.rule == "purchase_order"
-                    else flag.details
-                ),
+                details=(match_details if flag.rule == "purchase_order" else flag.details),
             )
         )
 

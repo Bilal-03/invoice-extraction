@@ -225,12 +225,8 @@ def map_to_extraction(data: dict) -> InvoiceExtraction:
         buyer=(
             BuyerDetails(
                 name=field(payload.buyer_name, "buyer_name"),
-                billing_address=field(
-                    payload.buyer_billing_address, "buyer_billing_address"
-                ),
-                shipping_address=field(
-                    payload.buyer_shipping_address, "buyer_shipping_address"
-                ),
+                billing_address=field(payload.buyer_billing_address, "buyer_billing_address"),
+                shipping_address=field(payload.buyer_shipping_address, "buyer_shipping_address"),
                 gstin=field(payload.buyer_gstin, "buyer_gstin"),
                 pan=field(payload.buyer_pan, "buyer_pan"),
             )
@@ -242,9 +238,7 @@ def map_to_extraction(data: dict) -> InvoiceExtraction:
         subtotal=payload.subtotal,
         discount_total=payload.discount_total or 0,
         tax_total=(
-            payload.tax_total
-            if payload.tax_total is not None
-            else sum(tax.amount for tax in taxes)
+            payload.tax_total if payload.tax_total is not None else sum(tax.amount for tax in taxes)
         ),
         shipping_amount=payload.shipping_amount or 0,
         grand_total=payload.grand_total,

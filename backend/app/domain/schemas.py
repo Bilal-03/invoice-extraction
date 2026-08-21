@@ -219,9 +219,7 @@ class EInvoiceDetails(BaseModel):
     irn: str | None = None
     ack_number: str | None = None
     qr_fields: dict[str, str] = Field(default_factory=dict)
-    comparison_status: Literal["match", "mismatch", "not_comparable", "not_checked"] = (
-        "not_checked"
-    )
+    comparison_status: Literal["match", "mismatch", "not_comparable", "not_checked"] = "not_checked"
     comparison_results: dict[str, QRComparisonResult] = Field(default_factory=dict)
 
 
@@ -298,9 +296,7 @@ class StandardEInvoice(BaseModel):
     qr_detected: bool = False
     qr_payload: str | None = None
     qr_fields: dict[str, str] = Field(default_factory=dict)
-    comparison_status: Literal["match", "mismatch", "not_comparable", "not_checked"] = (
-        "not_checked"
-    )
+    comparison_status: Literal["match", "mismatch", "not_comparable", "not_checked"] = "not_checked"
     comparison_results: dict[str, QRComparisonResult] = Field(default_factory=dict)
 
 

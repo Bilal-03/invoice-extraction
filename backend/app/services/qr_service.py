@@ -126,13 +126,9 @@ def compare_qr_with_extraction(
     ocr_fields: dict[str, str | None] = {
         "invoice_number": extraction.invoice_number.value,
         "invoice_date": extraction.invoice_date,
-        "seller_gstin": (
-            extraction.vendor.gstin.value if extraction.vendor.gstin else None
-        ),
+        "seller_gstin": (extraction.vendor.gstin.value if extraction.vendor.gstin else None),
         "buyer_gstin": (
-            extraction.buyer.gstin.value
-            if extraction.buyer and extraction.buyer.gstin
-            else None
+            extraction.buyer.gstin.value if extraction.buyer and extraction.buyer.gstin else None
         ),
         "taxable_amount": (
             str(extraction.subtotal - extraction.discount_total)
