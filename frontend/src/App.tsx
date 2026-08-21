@@ -76,7 +76,7 @@ function AppShell() {
     <div className="app-shell">
       <aside className={`sidebar ${sidebarOpen ? "open" : ""}`}>
         <div className="brand-lockup">
-          <div className="brand-mark">II</div>
+          <img className="brand-mark" src="/brand/invoice-intelligence-mark.svg" alt="" aria-hidden="true" />
           <div><strong>Invoice Intelligence</strong><span>AP operations console</span></div>
         </div>
         <div className="sidebar-label">Workspace</div>

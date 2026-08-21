@@ -11,7 +11,7 @@ a { color:inherit; text-decoration:none; }
 .app-shell { min-height:100vh; display:flex; }
 .sidebar { width:245px; flex:none; background:#20251f; color:#eceee7; padding:24px 14px 16px; display:flex; flex-direction:column; position:fixed; inset:0 auto 0 0; z-index:30; }
 .brand-lockup { display:flex; gap:10px; align-items:center; padding:0 10px 27px; }
-.brand-mark { width:30px; height:30px; border:1px solid #768178; border-radius:9px; display:grid; place-items:center; color:#f3f5ee; font:500 10px "DM Mono", monospace; letter-spacing:-.08em; }
+.brand-mark { width:34px; height:34px; flex:none; display:block; border-radius:9px; }
 .brand-lockup strong { display:block; font:italic 15px "Libre Baskerville", Georgia, serif; }
 .brand-lockup span, .workspace-user small, .provider-card small { display:block; color:#9da69c; font-size:10px; margin-top:3px; }
 .sidebar-label { color:#7e887d; font:10px "DM Mono", monospace; letter-spacing:.12em; text-transform:uppercase; padding:0 12px 8px; }
